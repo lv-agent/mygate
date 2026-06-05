@@ -1,0 +1,327 @@
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
+use axum::extract::State;
+use axum::Json;
+use futures::stream::Stream;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::SystemTime;
+use tokio::sync::RwLock;
+use tokio_stream::StreamExt;
+
+use crate::config::AppConfig;
+use crate::core::fallback;
+use crate::core::types::*;
+use crate::error::GatewayError;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Arc<RwLock<AppConfig>>,
+    pub client: Client,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAIChatRequest {
+    pub model: String,
+    pub messages: Vec<OpenAIChatMessage>,
+    #[serde(default)]
+    pub stream: bool,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u64>,
+    pub tools: Option<Vec<OpenAIToolDef>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAIChatMessage {
+    pub role: String,
+    pub content: serde_json::Value,
+    #[serde(rename = "tool_call_id")]
+    pub tool_call_id: Option<String>,
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAIToolDef {
+    pub r#type: Option<String>,
+    pub function: OpenAIToolFnDef,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAIToolFnDef {
+    pub name: String,
+    pub description: Option<String>,
+    pub parameters: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenAIChatResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<OpenAIChatChoice>,
+    pub usage: Option<OpenAIUsageResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenAIChatChoice {
+    pub index: u32,
+    pub message: OpenAIChatResponseMessage,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenAIChatResponseMessage {
+    pub role: String,
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenAIUsageResponse {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenAIModelsResponse {
+    pub object: String,
+    pub data: Vec<OpenAIModelItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenAIModelItem {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub owned_by: String,
+}
+
+fn parse_openai_messages(messages: Vec<OpenAIChatMessage>) -> Vec<InternalMessage> {
+    messages.into_iter().map(|msg| {
+        let role = match msg.role.as_str() {
+            "system" => Role::System,
+            "assistant" => Role::Assistant,
+            "tool" => Role::Tool,
+            _ => Role::User,
+        };
+        let mut content_blocks = Vec::new();
+        if let Some(tool_calls) = msg.tool_calls {
+            for tc in tool_calls {
+                let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if let Some(func) = tc.get("function").cloned() {
+                    let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    content_blocks.push(ContentBlock::ToolCall {
+                        id,
+                        function: FunctionCall { name, arguments: args },
+                    });
+                }
+            }
+        }
+        if let Some(tool_call_id) = msg.tool_call_id {
+            let text = match &msg.content {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            content_blocks.push(ContentBlock::ToolResult { tool_use_id: tool_call_id, content: text });
+        } else if let serde_json::Value::String(s) = &msg.content {
+            if !s.is_empty() {
+                content_blocks.push(ContentBlock::Text { text: s.clone() });
+            }
+        } else if let Some(arr) = msg.content.as_array() {
+            for item in arr {
+                if let Some(t) = item.get("type").and_then(|v| v.as_str()) {
+                    match t {
+                        "text" => {
+                            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                content_blocks.push(ContentBlock::Text { text: text.to_string() });
+                            }
+                        }
+                        "image_url" => {
+                            if let Some(url_obj) = item.get("image_url") {
+                                let url = url_obj.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                content_blocks.push(ContentBlock::ImageUrl {
+                                    image_url: ImageUrlContent { url, detail: None },
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        InternalMessage { role, content: content_blocks }
+    }).collect()
+}
+
+fn to_openai_response(internal: InternalResponse) -> OpenAIChatResponse {
+    let mut content_str = None;
+    let mut tool_calls_out = None;
+    for block in &internal.content {
+        match block {
+            ContentBlock::Text { text } => content_str = Some(text.clone()),
+            ContentBlock::ToolCall { id, function } => {
+                tool_calls_out.get_or_insert_with(Vec::new).push(serde_json::json!({
+                    "id": id,
+                    "type": "function",
+                    "function": { "name": function.name, "arguments": function.arguments }
+                }));
+            }
+            _ => {}
+        }
+    }
+    let created = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    OpenAIChatResponse {
+        id: internal.id,
+        object: "chat.completion".to_string(),
+        created,
+        model: internal.alias,
+        choices: vec![OpenAIChatChoice {
+            index: 0,
+            message: OpenAIChatResponseMessage { role: "assistant".to_string(), content: content_str, tool_calls: tool_calls_out },
+            finish_reason: internal.finish_reason,
+        }],
+        usage: Some(OpenAIUsageResponse {
+            prompt_tokens: internal.usage.prompt_tokens.unwrap_or(0),
+            completion_tokens: internal.usage.completion_tokens.unwrap_or(0),
+            total_tokens: internal.usage.total_tokens.unwrap_or(0),
+        }),
+    }
+}
+
+pub async fn list_models(State(state): State<AppState>) -> Json<OpenAIModelsResponse> {
+    let created = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let config = state.config.read().await;
+    let models: Vec<OpenAIModelItem> = config.aliases.keys().map(|name| OpenAIModelItem {
+        id: name.clone(),
+        object: "model".to_string(),
+        created,
+        owned_by: "mygate".to_string(),
+    }).collect();
+    Json(OpenAIModelsResponse { object: "list".to_string(), data: models })
+}
+
+pub async fn chat_completions(
+    State(state): State<AppState>,
+    Json(req): Json<OpenAIChatRequest>,
+) -> Result<impl IntoResponse, GatewayError> {
+    let internal_req = InternalRequest {
+        model_alias: req.model.clone(),
+        messages: parse_openai_messages(req.messages),
+        stream: req.stream,
+        temperature: req.temperature,
+        max_tokens: req.max_tokens,
+        tools: req.tools.map(|tools| tools.into_iter().map(|t| InternalTool {
+            name: t.function.name,
+            description: t.function.description,
+            parameters: t.function.parameters,
+        }).collect()),
+    };
+
+    if req.stream {
+        let stream = create_streaming_response(state, internal_req).await?;
+        Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
+    } else {
+        let result = fallback::execute_with_fallback(&state.client, state.config.clone(), &internal_req).await?;
+        let response = to_openai_response(result.response);
+        Ok(Json(response).into_response())
+    }
+}
+
+async fn create_streaming_response(
+    state: AppState,
+    internal_req: InternalRequest,
+) -> Result<Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>, GatewayError> {
+    let (backend_resp, target) = fallback::execute_streaming_fallback(
+        &state.client, state.config.clone(), &internal_req,
+    ).await?;
+    let alias = internal_req.model_alias.clone();
+    let target_model = target.model.clone();
+
+    let stream = async_stream::stream! {
+        let mut byte_stream = backend_resp.bytes_stream();
+        let mut buffer = String::new();
+        // Per-chunk timeout: if backend stops sending for 60s, abort the stream
+        let chunk_timeout = std::time::Duration::from_secs(60);
+        loop {
+            match tokio::time::timeout(chunk_timeout, byte_stream.next()).await {
+                Ok(Some(chunk_result)) => match chunk_result {
+                    Ok(bytes) => {
+                        tracing::debug!(len = bytes.len(), "Received bytes from backend");
+                        let text = match std::str::from_utf8(&bytes) { Ok(t) => t, Err(_) => continue };
+                        buffer.push_str(text);
+                        while let Some(pos) = buffer.find('\n') {
+                            let line = buffer[..pos].to_string();
+                            buffer = buffer[pos + 1..].to_string();
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() || trimmed.starts_with(':') { continue; }
+                            if trimmed == "data: [DONE]" {
+                                tracing::info!("Stream complete, sending [DONE] to client");
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            }
+                            if let Some(data) = trimmed.strip_prefix("data: ") {
+                                let replaced = data.replace(
+                                    &format!("\"model\":\"{}\"", target_model),
+                                    &format!("\"model\":\"{}\"", alias),
+                                );
+                                yield Ok(Event::default().data(replaced));
+                            } else {
+                                tracing::debug!(line = %trimmed, "Skipping non-SSE line from backend");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Stream chunk error");
+                        let error_data = serde_json::json!({"error": "stream interrupted", "detail": e.to_string()});
+                        yield Ok(Event::default().data(error_data.to_string()));
+                        yield Ok(Event::default().data("[DONE]"));
+                        return;
+                    }
+                },
+                Ok(None) => {
+                    // Stream ended normally (backend closed connection)
+                    tracing::warn!("Backend stream ended without [DONE]");
+                    yield Ok(Event::default().data("[DONE]"));
+                    return;
+                }
+                Err(_) => {
+                    // Per-chunk timeout — backend stopped sending data
+                    tracing::error!("Stream chunk timeout — no data from backend for {:?}", chunk_timeout);
+                    let error_data = serde_json::json!({"error": "stream timeout", "detail": "backend stopped sending data"});
+                    yield Ok(Event::default().data(error_data.to_string()));
+                    yield Ok(Event::default().data("[DONE]"));
+                    return;
+                }
+            }
+        }
+    };
+    Ok(Box::pin(stream))
+}
+
+pub async fn reload_config(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, GatewayError> {
+    let config_path = std::env::var("MYGATE_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
+    let result = AppConfig::load(&config_path).map_err(|e| e.to_string());
+    match result {
+        Ok(new_config) => {
+            let alias_count = new_config.aliases.len();
+            let provider_count = new_config.providers.len();
+            *state.config.write().await = new_config;
+            tracing::info!("Config reloaded: {} aliases, {} providers", alias_count, provider_count);
+            let body = serde_json::json!({"status": "ok", "aliases": alias_count, "providers": provider_count});
+            Ok(axum::response::Json(body))
+        }
+        Err(e) => {
+            tracing::error!("Config reload failed: {}", e);
+            Err(GatewayError::ConfigError(e))
+        }
+    }
+}

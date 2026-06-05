@@ -1,0 +1,49 @@
+[server]
+host = "127.0.0.1"
+port = 8080
+timeout_seconds = 30
+
+[providers.minimax]
+base_url = "https://api.minimax.chat/v1"
+api_key = "your-minimax-api-key"
+
+[providers.glm]
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key = "your-glm-api-key"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com/v1"
+api_key = "your-deepseek-api-key"
+
+[aliases.Simple]
+description = "Simple tasks, cheap model"
+[[aliases.Simple.chain]]
+provider = "minimax"
+model = "MiniMax-M2.7"
+priority = 1
+[[aliases.Simple.chain]]
+provider = "glm"
+model = "glm-4-flash"
+priority = 2
+
+[aliases.Code]
+description = "Code tasks"
+[[aliases.Code.chain]]
+provider = "deepseek"
+model = "deepseek-coder"
+priority = 1
+[[aliases.Code.chain]]
+provider = "glm"
+model = "glm-4-plus"
+priority = 2
+
+[aliases.Plan]
+description = "Planning / reasoning tasks"
+[[aliases.Plan.chain]]
+provider = "glm"
+model = "glm-5.1"
+priority = 1
+[[aliases.Plan.chain]]
+provider = "deepseek"
+model = "deepseek-reasoner"
+priority = 2
