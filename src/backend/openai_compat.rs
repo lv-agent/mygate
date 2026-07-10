@@ -444,11 +444,31 @@ pub async fn send_streaming(
         .unwrap_or("unknown")
         .to_string();
     tracing::info!(status = status, content_type = %ct, "Backend streaming response headers received");
+
+    // cr-411 P1: 4xx 错误流式不应返回 resp, 而应返回 GatewayError
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_string());
-        tracing::warn!(status = status, body = %body, "Backend returned error (streaming)");
-        return Err(GatewayError::BackendError { status, body });
+        let (typ, msg) = parse_error_body(&body).unwrap_or_else(|| {
+            tracing::warn!(body_len = body.len(), "非标准错误 body (非 JSON)");
+            ("api_error".to_string(), body.clone())
+        });
+        tracing::warn!(status = status, typ = %typ, "Backend streaming error");
+        return Err(GatewayError::BackendError {
+            status,
+            body: format!("streaming error ({}): {}", typ, msg),
+        });
     }
+
+    // 流式响应必须 content-type: text/event-stream. cr-411 P1: 用 Internal 错
+    // 误, 避免被 fallback 视为 502 fallback (which is 500-599 range)
+    if !ct.contains("text/event-stream") {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(GatewayError::Internal(format!(
+            "unexpected content-type '{}': {}",
+            ct, body
+        )));
+    }
+
     Ok(resp)
 }
 

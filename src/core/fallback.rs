@@ -156,10 +156,7 @@ pub async fn execute_streaming_fallback(
 
         match stream_result {
             Ok((resp, _is_anthropic)) => return Ok((resp, target.clone())),
-            Err(GatewayError::BackendError {
-                status,
-                ref body,
-            }) if should_fallback(status) => {
+            Err(GatewayError::BackendError { status, body }) if should_fallback(status) => {
                 tracing::warn!(provider = %target.provider_name, model = %target.model, status = status, "Streaming backend failed");
                 last_error = Some(GatewayError::BackendError {
                     status,
@@ -169,9 +166,10 @@ pub async fn execute_streaming_fallback(
                     ),
                 });
             }
-            Err(e) => {
-                tracing::warn!(provider = %target.provider_name, model = %target.model, error = %e, "Streaming backend failed");
-                last_error = Some(e);
+            // cr-411 P1: 非 fallback 4xx 错误直接抛, 不让 fallback 视为耗尽
+            Err(err) => {
+                tracing::warn!(provider = %target.provider_name, model = %target.model, error = %err, "Streaming backend non-fallback error");
+                return Err(err);
             }
         }
     }

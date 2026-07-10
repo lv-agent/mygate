@@ -332,3 +332,136 @@ fn test_parse_error_body_non_json() {
     let parsed = mygate::backend::openai_compat::parse_error_body(body);
     assert!(parsed.is_none(), "非 JSON 应该返回 None");
 }
+
+/// cr-411 P1: 流式 4xx 错误返回 GatewayError 而非 resp
+#[tokio::test]
+async fn streaming_4xx_error_returned_as_error() {
+    let mock = MockBackend::new();
+    mock.push_script(common::MockResponse::Json {
+        status: 401,
+        body: json!({"error": {"code": "401", "message": "invalid api key"}}),
+    });
+    let mock_url = mock.start().await;
+    let config: mygate::config::AppConfig = toml::from_str(&format!(
+        r#"
+[server]
+host = "127.0.0.1"
+port = 8080
+timeout_seconds = 30
+admin_token = ""
+
+[providers.mock]
+base_url = "{mock_url}/v1"
+api_key = "test"
+provider_type = "openai"
+auth_style = "bearer"
+
+[aliases.T]
+[[aliases.T.chain]]
+provider = "mock"
+model = "m"
+priority = 1
+"#
+    ))
+    .unwrap();
+    let state = AppState {
+        config: Arc::new(RwLock::new(config)),
+        client: reqwest::Client::new(),
+    };
+    let app = mygate::server::build_router(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "T",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    // cr-411 P1: 流式后端 4xx → MyGate 包装 502 + error message (不当作 fallback 耗尽)
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "4xx 错误应包装成 502");
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body).to_string();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["error"]["type"], "gateway_error");
+    assert!(
+        text.contains("invalid api key"),
+        "error body 应含 backend 错误信息: {}",
+        text
+    );
+}
+
+/// cr-411 P1: 流式 content-type 不是 text/event-stream → 拒绝
+#[tokio::test]
+async fn streaming_wrong_content_type_rejected() {
+    let mock = MockBackend::new();
+    mock.push_script(common::MockResponse::Json {
+        status: 200,
+        body: json!({"error": "some weird response"}),
+    });
+    let mock_url = mock.start().await;
+    let config: mygate::config::AppConfig = toml::from_str(&format!(
+        r#"
+[server]
+host = "127.0.0.1"
+port = 8080
+timeout_seconds = 30
+admin_token = ""
+
+[providers.mock]
+base_url = "{mock_url}/v1"
+api_key = "test"
+provider_type = "openai"
+auth_style = "bearer"
+
+[aliases.T]
+[[aliases.T.chain]]
+provider = "mock"
+model = "m"
+priority = 1
+"#
+    ))
+    .unwrap();
+    let state = AppState {
+        config: Arc::new(RwLock::new(config)),
+        client: reqwest::Client::new(),
+    };
+    let app = mygate::server::build_router(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "T",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body).to_string();
+    // cr-411 P1: content-type 非 text/event-stream → 500 (Internal error)
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "错 content-type 应 500");
+    assert!(
+        text.contains("unexpected content-type") || text.contains("gateway_error"),
+        "应含错误: {}",
+        text
+    );
+}
