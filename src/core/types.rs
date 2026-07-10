@@ -54,6 +54,10 @@ pub struct InternalTool {
 #[derive(Debug, Clone)]
 pub struct InternalRequest {
     pub model_alias: String,
+    /// 系统提示词（顶层字段）。cr-001: 从 Role::System 消息升级而来。
+    /// - Anthropic 后端：作为 body 顶层 `system` 字段
+    /// - OpenAI 兼容后端：作为 messages[0] role=system 消息
+    pub system: Option<String>,
     pub messages: Vec<InternalMessage>,
     pub stream: bool,
     pub temperature: Option<f64>,

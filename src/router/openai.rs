@@ -102,10 +102,25 @@ pub struct OpenAIModelItem {
     pub owned_by: String,
 }
 
-fn parse_openai_messages(messages: Vec<OpenAIChatMessage>) -> Vec<InternalMessage> {
-    messages.into_iter().map(|msg| {
+/// cr-001: 从 role=system 消息提取 system 文本，剩余 messages 不含 system 角色。
+/// 返回 (system, messages)。
+fn parse_openai_messages(messages: Vec<OpenAIChatMessage>) -> (Option<String>, Vec<InternalMessage>) {
+    let mut system: Option<String> = None;
+    let mut internal_messages: Vec<InternalMessage> = Vec::new();
+
+    for msg in messages {
+        // 提取 system：第一条 role=system 消息
+        if msg.role == "system" && system.is_none() {
+            if let serde_json::Value::String(s) = &msg.content {
+                if !s.is_empty() {
+                    system = Some(s.clone());
+                    continue; // 不当作普通消息保留
+                }
+            }
+        }
+
         let role = match msg.role.as_str() {
-            "system" => Role::System,
+            "system" => Role::System, // 多个 system 消息保留为 Role::System（罕见）
             "assistant" => Role::Assistant,
             "tool" => Role::Tool,
             _ => Role::User,
@@ -156,8 +171,9 @@ fn parse_openai_messages(messages: Vec<OpenAIChatMessage>) -> Vec<InternalMessag
                 }
             }
         }
-        InternalMessage { role, content: content_blocks }
-    }).collect()
+        internal_messages.push(InternalMessage { role, content: content_blocks });
+    }
+    (system, internal_messages)
 }
 
 fn to_openai_response(internal: InternalResponse) -> OpenAIChatResponse {
@@ -211,9 +227,11 @@ pub async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<OpenAIChatRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
+    let (system, internal_messages) = parse_openai_messages(req.messages);
     let internal_req = InternalRequest {
         model_alias: req.model.clone(),
-        messages: parse_openai_messages(req.messages),
+        system,
+        messages: internal_messages,
         stream: req.stream,
         temperature: req.temperature,
         max_tokens: req.max_tokens,

@@ -70,14 +70,12 @@ pub struct AnthropicUsage {
     pub output_tokens: u64,
 }
 
-fn parse_anthropic_messages(req: &AnthropicMessagesRequest) -> Vec<InternalMessage> {
-    let mut messages = Vec::new();
-
-    // Add system prompt as first message if present
-    if let Some(sys) = &req.system {
+fn parse_anthropic_messages(req: &AnthropicMessagesRequest) -> (Option<String>, Vec<InternalMessage>) {
+    // cr-001: system 提取为顶层字段（Anthropic 协议要求），不再塞到 Role::System 消息
+    let system = req.system.as_ref().and_then(|sys| {
         let text = match sys {
             serde_json::Value::String(s) => s.clone(),
-            arr if arr.is_array() => arr
+            serde_json::Value::Array(_) => sys
                 .as_array()
                 .unwrap()
                 .iter()
@@ -86,14 +84,10 @@ fn parse_anthropic_messages(req: &AnthropicMessagesRequest) -> Vec<InternalMessa
                 .join("\n"),
             other => other.to_string(),
         };
-        if !text.is_empty() {
-            messages.push(InternalMessage {
-                role: Role::System,
-                content: vec![ContentBlock::Text { text }],
-            });
-        }
-    }
+        if text.is_empty() { None } else { Some(text) }
+    });
 
+    let mut messages = Vec::new();
     for msg in &req.messages {
         let role = match msg.role.as_str() {
             "user" => Role::User,
@@ -199,7 +193,7 @@ fn parse_anthropic_messages(req: &AnthropicMessagesRequest) -> Vec<InternalMessa
             content: content_blocks,
         });
     }
-    messages
+    (system, messages)
 }
 
 fn to_anthropic_response(internal: InternalResponse) -> AnthropicMessagesResponse {
@@ -237,7 +231,7 @@ pub async fn messages(
     State(state): State<AppState>,
     Json(req): Json<AnthropicMessagesRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let internal_messages = parse_anthropic_messages(&req);
+    let (system, internal_messages) = parse_anthropic_messages(&req);
     let tools = req.tools.map(|tools| {
         tools
             .into_iter()
@@ -250,6 +244,7 @@ pub async fn messages(
     });
     let internal_req = InternalRequest {
         model_alias: req.model.clone(),
+        system,
         messages: internal_messages,
         stream: req.stream,
         temperature: req.temperature,
@@ -577,4 +572,83 @@ async fn create_anthropic_stream(
         }
     };
     Ok(Box::pin(stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::*;
+    use std::collections::HashMap;
+
+    /// cr-001 RED: 当前 parse_anthropic_messages 把 system 塞进 Role::System 消息，
+    /// 这是协议错误。Anthropic /v1/messages 要求 system 是顶层字段，不是消息。
+    /// cr-001 实施后：
+    /// 1. 返回值改成 (Option<String>, Vec<InternalMessage>)
+    /// 2. 系统文本放第一个元素
+    /// 3. messages 列表里不出现 Role::System
+    #[test]
+    fn parse_anthropic_messages_extracts_system_to_top_level() {
+        let req = AnthropicMessagesRequest {
+            model: "Plan".to_string(),
+            max_tokens: Some(100),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("hi"),
+            }],
+            system: Some(serde_json::json!("You are helpful")),
+            stream: false,
+            temperature: None,
+            tools: None,
+        };
+        // 现状 RED：调用方期望 (Option<String>, Vec<InternalMessage>) 但当前函数返回 Vec<InternalMessage>
+        // 期望系统被抽到顶层，messages 不含 Role::System
+        let (system, messages) = parse_anthropic_messages(&req);
+        assert_eq!(system, Some("You are helpful".to_string()));
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(messages[0].role, Role::User));
+        assert!(!messages.iter().any(|m| matches!(m.role, Role::System)));
+    }
+
+    #[test]
+    fn parse_anthropic_messages_system_array_concatenates() {
+        // 数组形式 system 块：拼接所有 text 字段
+        let req = AnthropicMessagesRequest {
+            model: "Plan".to_string(),
+            max_tokens: Some(100),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("hi"),
+            }],
+            system: Some(serde_json::json!([
+                {"type": "text", "text": "Part 1"},
+                {"type": "text", "text": "Part 2"}
+            ])),
+            stream: false,
+            temperature: None,
+            tools: None,
+        };
+        let (system, messages) = parse_anthropic_messages(&req);
+        assert_eq!(system, Some("Part 1\nPart 2".to_string()));
+        assert!(!messages.iter().any(|m| matches!(m.role, Role::System)));
+    }
+
+    #[test]
+    fn parse_anthropic_messages_no_system_returns_none() {
+        let req = AnthropicMessagesRequest {
+            model: "Plan".to_string(),
+            max_tokens: Some(100),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("hi"),
+            }],
+            system: None,
+            stream: false,
+            temperature: None,
+            tools: None,
+        };
+        let (system, messages) = parse_anthropic_messages(&req);
+        assert_eq!(system, None);
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(messages[0].role, Role::User));
+    }
 }

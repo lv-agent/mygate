@@ -187,6 +187,7 @@ mod tests {
     fn test_request() -> InternalRequest {
         InternalRequest {
             model_alias: "Test".to_string(),
+            system: None,
             messages: vec![InternalMessage {
                 role: Role::User,
                 content: vec![ContentBlock::Text {

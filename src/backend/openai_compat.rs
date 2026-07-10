@@ -97,7 +97,19 @@ pub struct OpenAIUsage {
 }
 
 fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
-    let messages: Vec<OpenAIMessage> = req.messages.iter().flat_map(|msg| {
+    // cr-001: 如果有顶层 system 字段，预先追加为 messages[0] role=system
+    let mut messages: Vec<OpenAIMessage> = Vec::new();
+    if let Some(system) = &req.system {
+        if !system.is_empty() {
+            messages.push(OpenAIMessage {
+                role: "system".to_string(),
+                content: serde_json::Value::String(system.clone()),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+    }
+    let mut msg_iter = req.messages.iter().flat_map(|msg| {
         let role = match msg.role {
             Role::System => "system",
             Role::User => "user",
@@ -163,7 +175,7 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
         }
 
         result
-    }).collect();
+    });
 
     let tools = req.tools.as_ref().map(|t| {
         t.iter().map(|tool| OpenAITool {
@@ -175,6 +187,9 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
             },
         }).collect()
     });
+
+    // 把 flat_map 出来的 messages 追加到已预填的 system 消息后面
+    messages.extend(msg_iter);
 
     OpenAIRequest {
         model: model.to_string(),
@@ -367,11 +382,8 @@ mod tests {
     fn test_to_openai_request_basic() {
         let req = InternalRequest {
             model_alias: "Simple".to_string(),
+            system: Some("You are helpful".to_string()),
             messages: vec![
-                InternalMessage {
-                    role: Role::System,
-                    content: vec![ContentBlock::Text { text: "You are helpful".to_string() }],
-                },
                 InternalMessage {
                     role: Role::User,
                     content: vec![ContentBlock::Text { text: "Hello".to_string() }],
@@ -386,14 +398,35 @@ mod tests {
         assert_eq!(openai.model, "glm-4-flash");
         assert_eq!(openai.messages.len(), 2);
         assert_eq!(openai.messages[0].role, "system");
+        assert_eq!(openai.messages[0].content, serde_json::json!("You are helpful"));
+        assert_eq!(openai.messages[1].role, "user");
         assert!(openai.stream.is_none());
         assert_eq!(openai.temperature, Some(0.7));
+    }
+
+    /// cr-001: 验证 system 字段转 role=system 消息
+    #[test]
+    fn test_to_openai_request_system_from_top_level() {
+        let req = InternalRequest {
+            model_alias: "Plan".to_string(),
+            system: Some("Top-level system".to_string()),
+            messages: vec![],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+        };
+        let openai = to_openai_request(&req, "glm-5.1");
+        assert_eq!(openai.messages.len(), 1);
+        assert_eq!(openai.messages[0].role, "system");
+        assert_eq!(openai.messages[0].content, serde_json::json!("Top-level system"));
     }
 
     #[test]
     fn test_to_openai_request_streaming() {
         let req = InternalRequest {
             model_alias: "Simple".to_string(),
+            system: None,
             messages: vec![],
             stream: true,
             temperature: None,
