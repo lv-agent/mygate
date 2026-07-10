@@ -251,6 +251,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         }
     }

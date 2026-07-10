@@ -101,6 +101,19 @@ fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> serde_js
         };
         body["tool_choice"] = v;
     }
+    // cr-206 补全: metadata 透传（Anthropic 标准字段）
+    if let Some(ref m) = internal_req.metadata {
+        if !m.is_empty() {
+            // 限制最多 16 个 key（OpenAI 标准限制）
+            let mut limited: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+            for (k, v) in m.iter().take(16) {
+                limited.insert(k.clone(), v.clone());
+            }
+            body["metadata"] = serde_json::Value::Object(
+                limited.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect()
+            );
+        }
+    }
     body
 }
 
@@ -283,6 +296,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         }
     }
@@ -333,6 +347,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         };
         let body = build_anthropic_body(&req, "m");
@@ -375,6 +390,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         };
         let body = build_anthropic_body(&req, "m");
@@ -416,6 +432,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         };
         let body = build_anthropic_body(&req, "m");
@@ -455,6 +472,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         };
         let body = build_anthropic_body(&req, "m");
@@ -484,6 +502,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         };
         let body = build_anthropic_body(&req, "m");

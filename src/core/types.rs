@@ -124,6 +124,8 @@ pub struct InternalRequest {
     pub stream_options: Option<StreamOptions>,
     /// cr-206: 用户标识
     pub user: Option<String>,
+    /// cr-206 补全: Anthropic metadata 字段（Map<String, String>，最多 16 keys）
+    pub metadata: Option<std::collections::HashMap<String, String>>,
 }
 
 /// cr-104: 流式选项

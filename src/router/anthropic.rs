@@ -26,6 +26,9 @@ pub struct AnthropicMessagesRequest {
     /// cr-101: 工具选择策略（Anthropic 协议，必为 object）
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
+    /// cr-206 补全: 元数据（最多 16 个 key，value 是 string）
+    #[serde(default)]
+    pub metadata: Option<std::collections::HashMap<String, String>>,
     /// cr-103: 采样参数
     #[serde(default)]
     pub top_p: Option<f64>,
@@ -365,6 +368,8 @@ pub async fn messages(
         n: None,
         stream_options: None, // cr-104: Anthropic 协议无此字段
         user: None, // cr-206: Anthropic 协议 metadata，OpenAI user 字段不直接通用
+        // cr-206 补全: Anthropic metadata 透传
+        metadata: req.metadata.clone(),
     };
 
     tracing::info!(
@@ -731,6 +736,7 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: None,
+            metadata: None,
         };
         // 现状 RED：调用方期望 (Option<String>, Vec<InternalMessage>) 但当前函数返回 Vec<InternalMessage>
         // 期望系统被抽到顶层，messages 不含 Role::System
@@ -762,6 +768,7 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: None,
+            metadata: None,
         };
         let (system, messages) = parse_anthropic_messages(&req);
         assert_eq!(system, Some("Part 1\nPart 2".to_string()));
@@ -785,6 +792,7 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: None,
+            metadata: None,
         };
         let (system, messages) = parse_anthropic_messages(&req);
         assert_eq!(system, None);
@@ -815,6 +823,7 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: None,
+            metadata: None,
         };
         let (system, _) = parse_anthropic_messages(&req);
         // 短期方案 A：cache_control 丢弃，system 文本拼接

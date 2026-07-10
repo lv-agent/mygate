@@ -466,6 +466,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         };
         let openai = to_openai_request(&req, "glm-4-flash");
@@ -499,6 +500,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         };
         let openai = to_openai_request(&req, "glm-5.1");
@@ -527,6 +529,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         };
         let openai = to_openai_request(&req, "test-model");
@@ -591,6 +594,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
             messages: vec![],
             stream: false,
@@ -665,6 +669,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         }
     }
@@ -719,6 +724,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: None,
         }
     }
@@ -783,6 +789,7 @@ mod tests {
             n: None,
             stream_options: Some(StreamOptions { include_usage: true }),
             user: None,
+            metadata: None,
         };
         let openai = to_openai_request(&req, "x");
         assert_eq!(
@@ -822,6 +829,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            metadata: None,
             user: Some("user-12345".to_string()),
         };
         let openai = to_openai_request(&req, "x");

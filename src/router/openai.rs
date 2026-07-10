@@ -339,6 +339,8 @@ pub async fn chat_completions(
         }),
         // cr-206: user 标识
         user: req.user.clone(),
+        // cr-206 补全: metadata 透传（OpenAI 客户端发的 metadata 字段）
+        metadata: None, // cr-206 补全: OpenAI metadata → 暂不自动转 Anthropic
     };
 
     if req.stream {
