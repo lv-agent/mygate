@@ -8,7 +8,7 @@ use reqwest::Client;
 use std::time::Duration;
 
 /// 构造 Anthropic 协议请求 body（流式与非流式共用）
-fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> serde_json::Value {
+fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> Result<serde_json::Value, GatewayError> {
     // cr-001: system 不在 messages 里，而是顶层字段
     let mut messages: Vec<serde_json::Value> = Vec::new();
     for msg in &internal_req.messages {
@@ -20,6 +20,27 @@ fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> serde_js
             Role::Tool => "user",
             Role::System => unreachable!(),
         };
+        // cr-204 体积限制：先检查 (before map)
+        for block in &msg.content {
+            if let ContentBlock::Document { source } = block {
+                if let crate::core::types::DocumentSource::Base64 { media_type, data } = source {
+                    if media_type == "application/pdf" {
+                        let decoded_bytes = data.len() * 3 / 4;
+                        const MAX_PDF_BYTES: usize = 5 * 1024 * 1024;
+                        if decoded_bytes > MAX_PDF_BYTES {
+                            return Err(GatewayError::BackendError {
+                                status: 413,
+                                body: format!(
+                                    "PDF too large: {} KB > 5 MB limit",
+                                    decoded_bytes / 1024
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         let content = msg.content.iter().map(|block| match block {
             ContentBlock::Text { text } => serde_json::json!({"type":"text","text":text}),
             ContentBlock::ImageUrl { image_url } => {
@@ -114,7 +135,7 @@ fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> serde_js
             );
         }
     }
-    body
+    Ok(body)
 }
 
 /// 构造带鉴权头的 reqwest RequestBuilder
@@ -140,7 +161,7 @@ pub async fn send_anthropic_request(
     let base = provider.base_url.trim_end_matches('/');
     let url = format!("{}/v1/messages", base);
     let model = preferred_model;
-    let body = build_anthropic_body(internal_req, model);
+    let body = build_anthropic_body(internal_req, model)?;
 
     tracing::info!(model=%model, url=%url, tools=%internal_req.tools.as_ref().map(|t|t.len()).unwrap_or(0), "Anthropic passthrough");
 
@@ -240,7 +261,7 @@ pub async fn send_anthropic_streaming_request(
     let base = provider.base_url.trim_end_matches('/');
     let url = format!("{}/v1/messages", base);
     let model = preferred_model;
-    let mut body = build_anthropic_body(internal_req, model);
+    let mut body = build_anthropic_body(internal_req, model)?;
     // 流式标志
     body["stream"] = serde_json::Value::Bool(true);
 
@@ -304,7 +325,7 @@ mod tests {
     /// cr-004: build_anthropic_body 包含 system 顶层、tools、tool_choice object
     #[test]
     fn test_build_anthropic_body_has_all_fields() {
-        let body = build_anthropic_body(&req_with_system_and_tool(), "claude-sonnet-4-5");
+        let body = build_anthropic_body(&req_with_system_and_tool(), "claude-sonnet-4-5").unwrap();
         assert_eq!(body["model"], "claude-sonnet-4-5");
         assert_eq!(body["max_tokens"], 1024);
         assert_eq!(body["temperature"], 0.5);
@@ -350,7 +371,7 @@ mod tests {
             metadata: None,
             user: None,
         };
-        let body = build_anthropic_body(&req, "m");
+        let body = build_anthropic_body(&req, "m").unwrap();
         let content = &body["messages"][0]["content"][0];
         assert_eq!(content["type"], "image");
         assert_eq!(content["source"]["type"], "base64");
@@ -393,7 +414,7 @@ mod tests {
             metadata: None,
             user: None,
         };
-        let body = build_anthropic_body(&req, "m");
+        let body = build_anthropic_body(&req, "m").unwrap();
         let content = &body["messages"][0]["content"][0];
         assert_eq!(content["type"], "document");
         assert_eq!(content["source"]["type"], "base64");
@@ -435,7 +456,7 @@ mod tests {
             metadata: None,
             user: None,
         };
-        let body = build_anthropic_body(&req, "m");
+        let body = build_anthropic_body(&req, "m").unwrap();
         let content = &body["messages"][0]["content"][0];
         assert_eq!(content["type"], "document");
         assert_eq!(content["source"]["type"], "url");
@@ -475,7 +496,7 @@ mod tests {
             metadata: None,
             user: None,
         };
-        let body = build_anthropic_body(&req, "m");
+        let body = build_anthropic_body(&req, "m").unwrap();
         let content = &body["messages"][0]["content"][0];
         // HTTP URL 降级为文本（不丢消息），让客户端能感知到
         assert_eq!(content["type"], "text");
@@ -505,7 +526,7 @@ mod tests {
             metadata: None,
             user: None,
         };
-        let body = build_anthropic_body(&req, "m");
+        let body = build_anthropic_body(&req, "m").unwrap();
         assert_eq!(body["model"], "m");
         assert_eq!(body["max_tokens"], 100);
         assert!(body.get("system").is_none());
@@ -546,4 +567,87 @@ impl BackendAdapter for AnthropicPassthroughAdapter {
     ) -> Result<reqwest::Response, GatewayError> {
         send_anthropic_streaming_request(client, provider, request, model).await
     }
+}
+
+/// cr-204: PDF 体积限制 — base64 解码后 > 5MB 拒发（返回 413）
+#[test]
+fn test_pdf_size_limit() {
+    use crate::core::types::{ContentBlock, DocumentSource, InternalMessage, Role};
+
+    // 构造一个 > 5MB 的 base64 串（每个字符 0.75 字节解码）
+    // 6MB 解码后需要 ~8MB base64 串
+    let big_pdf = "A".repeat(8 * 1024 * 1024);
+    let req = InternalRequest {
+        model_alias: "P".to_string(),
+        system: None,
+        messages: vec![InternalMessage {
+            role: Role::User,
+            content: vec![ContentBlock::Document {
+                source: DocumentSource::Base64 {
+                    media_type: "application/pdf".to_string(),
+                    data: big_pdf,
+                },
+            }],
+        }],
+        stream: false,
+        temperature: None,
+        max_tokens: Some(100),
+        tools: None,
+        tool_choice: None,
+        response_format: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        stop: None,
+        seed: None,
+        n: None,
+        stream_options: None,
+        user: None,
+        metadata: None,
+    };
+    let result = build_anthropic_body(&req, "m");
+    assert!(result.is_err(), "大 PDF 应被拒发");
+    let err = result.unwrap_err();
+    assert!(format!("{}", err).contains("PDF too large"), "错误信息应含 'PDF too large': {}", err);
+}
+
+/// cr-204: 小 PDF (< 5MB) 应正常通过
+#[test]
+fn test_pdf_under_limit_passes() {
+    use crate::core::types::{ContentBlock, DocumentSource, InternalMessage, Role};
+
+    // 1MB PDF（base64 约 1.4MB）
+    let small_pdf = "A".repeat(1_400_000);
+    let req = InternalRequest {
+        model_alias: "P".to_string(),
+        system: None,
+        messages: vec![InternalMessage {
+            role: Role::User,
+            content: vec![ContentBlock::Document {
+                source: DocumentSource::Base64 {
+                    media_type: "application/pdf".to_string(),
+                    data: small_pdf,
+                },
+            }],
+        }],
+        stream: false,
+        temperature: None,
+        max_tokens: Some(100),
+        tools: None,
+        tool_choice: None,
+        response_format: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        stop: None,
+        seed: None,
+        n: None,
+        stream_options: None,
+        user: None,
+        metadata: None,
+    };
+    let result = build_anthropic_body(&req, "m");
+    assert!(result.is_ok(), "小 PDF 应通过: {:?}", result.err());
 }
