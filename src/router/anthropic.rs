@@ -2,11 +2,10 @@ use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
-use futures::stream::Stream;
+use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::pin::Pin;
-use tokio_stream::StreamExt;
 
 use crate::core::fallback;
 use crate::core::types::*;
@@ -409,301 +408,29 @@ async fn create_anthropic_stream(
 ) -> Result<Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>, GatewayError> {
     let (backend_resp, _target) =
         fallback::execute_streaming_fallback(&state.client, state.config.clone(), &internal_req).await?;
-    let alias = internal_req.model_alias.clone();
-    let msg_id = uuid::Uuid::new_v4().to_string();
 
-    let stream = async_stream::stream! {
-        // message_start
-        let start_event = serde_json::json!({
-            "type": "message_start",
-            "message": {
-                "id": msg_id,
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": alias,
-                "stop_reason": null,
-                "stop_sequence": null,
-                "usage": {"input_tokens": 0, "output_tokens": 0}
-            }
-        });
-        yield Ok(Event::default().event("message_start").data(start_event.to_string()));
-
-        let mut byte_stream = backend_resp.bytes_stream();
-        let mut buffer = String::new();
-        let mut output_tokens: u64 = 0;
-        let chunk_timeout = std::time::Duration::from_secs(60);
-
-        // State machine: track which content blocks are open
-        // Block 0 = thinking (reasoning_content), Block 1 = text (content)
-        let mut block_index: usize = 0;
-        let mut thinking_open = false;
-        let mut text_open = false;
-        let mut final_stop_reason = "end_turn".to_string();
-        let mut current_tc_block: Option<usize> = None;
-        let mut had_blocks = false;
-
-        loop {
-            match tokio::time::timeout(chunk_timeout, byte_stream.next()).await {
-                Ok(Some(chunk_result)) => match chunk_result {
-                    Ok(bytes) => {
-                        tracing::trace!(len = bytes.len(), "Received bytes from backend (anthropic)");
-                        let text = match std::str::from_utf8(&bytes) {
-                            Ok(t) => t,
-                            Err(_) => continue,
-                        };
-                        buffer.push_str(text);
-                        while let Some(pos) = buffer.find('\n') {
-                            let line = buffer[..pos].to_string();
-                            buffer = buffer[pos + 1..].to_string();
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() || trimmed.starts_with(':') {
-                                continue;
-                            }
-                            if trimmed == "data: [DONE]" {
-                                // Close any open tool block
-                                if let Some(bi) = current_tc_block.take() {
-                                    yield Ok(Event::default()
-                                        .event("content_block_stop")
-                                        .data(serde_json::json!({"type":"content_block_stop","index":bi}).to_string()));
-                                }
-                                // Close thinking block if open
-                                if thinking_open {
-                                    yield Ok(Event::default()
-                                        .event("content_block_stop")
-                                        .data(serde_json::json!({"type":"content_block_stop","index":0}).to_string()));
-                                }
-                                // Close text block if open
-                                if text_open {
-                                    yield Ok(Event::default()
-                                        .event("content_block_stop")
-                                        .data(serde_json::json!({"type":"content_block_stop","index":block_index}).to_string()));
-                                }
-                                // If nothing was ever opened, open+close a text block
-                                if !had_blocks {
-                                    yield Ok(Event::default()
-                                        .event("content_block_start")
-                                        .data(serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}).to_string()));
-                                    yield Ok(Event::default()
-                                        .event("content_block_stop")
-                                        .data(serde_json::json!({"type":"content_block_stop","index":0}).to_string()));
-                                }
-                                let msg_delta = serde_json::json!({
-                                    "type": "message_delta",
-                                    "delta": {"stop_reason": final_stop_reason, "stop_sequence": null},
-                                    "usage": {"output_tokens": output_tokens}
-                                });
-                                yield Ok(Event::default()
-                                    .event("message_delta")
-                                    .data(msg_delta.to_string()));
-                                yield Ok(Event::default()
-                                    .event("message_stop")
-                                    .data("{\"type\":\"message_stop\"}"));
-                                return;
-                            }
-                            if let Some(data) = trimmed.strip_prefix("data: ") {
-                                tracing::trace!("Raw SSE from backend (anthropic): {}", data);
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(choices) =
-                                        parsed.get("choices").and_then(|c| c.as_array())
-                                    {
-                                        for choice in choices {
-                                            // Check finish_reason at choice level
-                                            if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
-                                                if fr == "tool_calls" {
-                                                    final_stop_reason = "tool_use".to_string();
-                                                    tracing::info!("Backend finish_reason=tool_calls → Anthropic stop_reason=tool_use");
-                                                }
-                                            }
-                                            if let Some(delta) = choice.get("delta") {
-                                                // Handle reasoning_content → thinking block
-                                                if let Some(reasoning) = delta
-                                                    .get("reasoning_content")
-                                                    .and_then(|c| c.as_str())
-                                                {
-                                                    if !reasoning.is_empty() {
-                                                        // Close any open tool block
-                                                        if let Some(bi) = current_tc_block.take() {
-                                                            yield Ok(Event::default()
-                                                                .event("content_block_stop")
-                                                                .data(serde_json::json!({"type":"content_block_stop","index":bi}).to_string()));
-                                                        }
-                                                        if !thinking_open {
-                                                            thinking_open = true;
-                                                            had_blocks = true;
-                                                            yield Ok(Event::default()
-                                                                .event("content_block_start")
-                                                                .data(serde_json::json!({
-                                                                    "type": "content_block_start",
-                                                                    "index": 0,
-                                                                    "content_block": {"type": "thinking", "thinking": ""}
-                                                                }).to_string()));
-                                                        }
-                                                        output_tokens += 1;
-                                                        yield Ok(Event::default()
-                                                            .event("content_block_delta")
-                                                            .data(serde_json::json!({
-                                                                "type": "content_block_delta",
-                                                                "index": 0,
-                                                                "delta": {"type": "thinking_delta", "thinking": reasoning}
-                                                            }).to_string()));
-                                                    }
-                                                }
-                                                // Handle content → text block
-                                                if let Some(content) =
-                                                    delta.get("content").and_then(|c| c.as_str())
-                                                {
-                                                    if !content.is_empty() {
-                                                        // Close any open tool block
-                                                        if let Some(bi) = current_tc_block.take() {
-                                                            yield Ok(Event::default()
-                                                                .event("content_block_stop")
-                                                                .data(serde_json::json!({"type":"content_block_stop","index":bi}).to_string()));
-                                                            block_index = bi + 1;
-                                                        }
-                                                        // Close thinking block if still open
-                                                        if thinking_open {
-                                                            thinking_open = false;
-                                                            yield Ok(Event::default()
-                                                                .event("content_block_stop")
-                                                                .data(serde_json::json!({"type":"content_block_stop","index":0}).to_string()));
-                                                            block_index = 1;
-                                                        }
-                                                        if !text_open {
-                                                            text_open = true;
-                                                            had_blocks = true;
-                                                            yield Ok(Event::default()
-                                                                .event("content_block_start")
-                                                                .data(serde_json::json!({
-                                                                    "type": "content_block_start",
-                                                                    "index": block_index,
-                                                                    "content_block": {"type": "text", "text": ""}
-                                                                }).to_string()));
-                                                        }
-                                                        output_tokens += 1;
-                                                        yield Ok(Event::default()
-                                                            .event("content_block_delta")
-                                                            .data(serde_json::json!({
-                                                                "type": "content_block_delta",
-                                                                "index": block_index,
-                                                                "delta": {"type": "text_delta", "text": content}
-                                                            }).to_string()));
-                                                    }
-                                                }
-                                                // Handle tool_calls → tool_use blocks
-                                                if let Some(tool_calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
-                                                    for tc in tool_calls {
-                                                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                                        let name = tc.get("function")
-                                                            .and_then(|f| f.get("name"))
-                                                            .and_then(|n| n.as_str())
-                                                            .unwrap_or("");
-                                                        let args = tc.get("function")
-                                                            .and_then(|f| f.get("arguments"))
-                                                            .and_then(|a| a.as_str())
-                                                            .unwrap_or("");
-
-                                                        // New tool call (has id or name)
-                                                        if !id.is_empty() || !name.is_empty() {
-                                                            // Close previous tool block if open
-                                                            if let Some(bi) = current_tc_block.take() {
-                                                                yield Ok(Event::default()
-                                                                    .event("content_block_stop")
-                                                                    .data(serde_json::json!({"type":"content_block_stop","index":bi}).to_string()));
-                                                                block_index = bi + 1;
-                                                            }
-                                                            // Close thinking block if open
-                                                            if thinking_open {
-                                                                thinking_open = false;
-                                                                yield Ok(Event::default()
-                                                                    .event("content_block_stop")
-                                                                    .data(serde_json::json!({"type":"content_block_stop","index":0}).to_string()));
-                                                                block_index = 1;
-                                                            }
-                                                            // Close text block if open
-                                                            if text_open {
-                                                                text_open = false;
-                                                                yield Ok(Event::default()
-                                                                    .event("content_block_stop")
-                                                                    .data(serde_json::json!({"type":"content_block_stop","index":block_index}).to_string()));
-                                                                block_index += 1;
-                                                            }
-
-                                                            let tool_id = if id.is_empty() {
-                                                                format!("toolu_{}", uuid::Uuid::new_v4())
-                                                            } else {
-                                                                id.to_string()
-                                                            };
-                                                            let tool_name = if name.is_empty() {
-                                                                "unknown"
-                                                            } else {
-                                                                name
-                                                            };
-
-                                                            tracing::info!(
-                                                                "Tool call detected: id={} name={} block_index={}",
-                                                                tool_id, tool_name, block_index
-                                                            );
-
-                                                            // Start tool_use content block
-                                                            had_blocks = true;
-                                                            yield Ok(Event::default()
-                                                                .event("content_block_start")
-                                                                .data(serde_json::json!({
-                                                                    "type": "content_block_start",
-                                                                    "index": block_index,
-                                                                    "content_block": {
-                                                                        "type": "tool_use",
-                                                                        "id": tool_id,
-                                                                        "name": tool_name,
-                                                                        "input": {}
-                                                                    }
-                                                                }).to_string()));
-
-                                                            current_tc_block = Some(block_index);
-                                                            final_stop_reason = "tool_use".to_string();
-                                                        }
-
-                                                        // Arguments delta (can be in same chunk or subsequent chunks)
-                                                        if !args.is_empty() {
-                                                            if let Some(bi) = current_tc_block {
-                                                                yield Ok(Event::default()
-                                                                    .event("content_block_delta")
-                                                                    .data(serde_json::json!({
-                                                                        "type": "content_block_delta",
-                                                                        "index": bi,
-                                                                        "delta": {"type": "input_json_delta", "partial_json": args}
-                                                                    }).to_string()));
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "Stream error in Anthropic proxy");
-                        break;
-                    }
-                },
-                Ok(None) => {
-                    tracing::warn!("Backend stream ended without [DONE] (Anthropic)");
-                    break;
-                }
-                Err(_) => {
-                    tracing::error!(
-                        "Stream chunk timeout — no data from backend for {:?} (Anthropic)",
-                        chunk_timeout
-                    );
-                    break;
+    // P1-2: Anthropic→Anthropic SSE passthrough
+    let stream = backend_resp.bytes_stream().then(|chunk_result| async move {
+        let mut events: Vec<Result<Event, Infallible>> = Vec::new();
+        if let Ok(bytes) = chunk_result {
+            let text = String::from_utf8_lossy(&bytes);
+            let mut current_event: Option<String> = None;
+            for line in text.lines() {
+                if let Some(ev) = line.strip_prefix("event: ") {
+                    current_event = Some(ev.to_string());
+                } else if let Some(data) = line.strip_prefix("data: ") {
+                    let event = if let Some(name) = current_event.take() {
+                        Event::default().event(name).data(data.to_string())
+                    } else {
+                        Event::default().data(data.to_string())
+                    };
+                    events.push(Ok(event));
                 }
             }
         }
-    };
+        futures::stream::iter(events)
+    }).flatten();
+
     Ok(Box::pin(stream))
 }
 

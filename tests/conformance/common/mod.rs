@@ -140,18 +140,18 @@ async fn handle_request(
             (s, axum::Json(body)).into_response()
         }
         MockResponse::StreamSse { events } => {
-            let body = stream::iter(events.into_iter().map(|e| {
-                let mut s = String::new();
-                if let Some(ev) = e.event {
-                    s.push_str(&format!("event: {}\n", ev));
+            // P1-2: 拼成单 chunk body (避免 stream 多 chunk 问题)
+            let mut body_str = String::new();
+            for e in events {
+                if let Some(ev) = &e.event {
+                    body_str.push_str(&format!("event: {}\n", ev));
                 }
-                s.push_str(&format!("data: {}\n\n", e.data));
-                Ok::<Bytes, std::io::Error>(Bytes::from(s))
-            }));
+                body_str.push_str(&format!("data: {}\n\n", e.data));
+            }
             (
                 StatusCode::OK,
                 [("content-type", "text/event-stream")],
-                axum::body::Body::from_stream(body),
+                body_str,
             )
                 .into_response()
         }
