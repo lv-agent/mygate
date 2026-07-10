@@ -328,10 +328,9 @@ async fn create_streaming_response(
                                 return;
                             }
                             if let Some(data) = trimmed.strip_prefix("data: ") {
-                                let replaced = data.replace(
-                                    &format!("\"model\":\"{}\"", target_model),
-                                    &format!("\"model\":\"{}\"", alias),
-                                );
+                                // cr-105: JSON 路径感知的 model 替换（替代原字符串 replace）
+                                let replaced = transform_model_in_chunk(data, &target_model, &alias)
+                                    .unwrap_or_else(|| data.to_string());
                                 yield Ok(Event::default().data(replaced));
                             } else {
                                 tracing::debug!(line = %trimmed, "Skipping non-SSE line from backend");
@@ -384,5 +383,99 @@ pub async fn reload_config(
             tracing::error!("Config reload failed: {}", e);
             Err(GatewayError::ConfigError(e))
         }
+    }
+}
+
+// =====================================================================
+// cr-105: OpenAI 流式状态机 — 把 model 字段替换抽成纯函数
+// =====================================================================
+
+/// cr-105: JSON 路径感知的 model 字段替换
+/// - 只替换顶层 `model` 字段（不替换嵌套字段，避免误伤）
+/// - 解析失败时回退到原文（不丢数据）
+/// - 不是合法 JSON 或不含 `model` 字段时返回 None（不修改）
+pub(crate) fn transform_model_in_chunk(
+    data: &str,
+    target_model: &str,
+    alias: &str,
+) -> Option<String> {
+    let mut v: serde_json::Value = serde_json::from_str(data).ok()?;
+    let obj = v.as_object_mut()?;
+    // 没 model 字段 → 视为非目标 chunk，原样转发
+    if !obj.contains_key("model") {
+        return None;
+    }
+    if let Some(m) = obj.get_mut("model") {
+        if m.as_str() == Some(target_model) {
+            *m = serde_json::Value::String(alias.to_string());
+        }
+    }
+    Some(serde_json::to_string(&v).ok()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cr-105 RED: 旧实现用 `data.replace("\"model\":\"X\"", "\"model\":\"alias\"")`
+    /// 字符串替换，会误伤嵌套字段（如 `metadata.model` 或 chunk 内的 "X-extra-model"）。
+    /// 新实现按 JSON 路径只替换顶层 `model`。
+    #[test]
+    fn test_transform_model_basic() {
+        let data = r#"{"id":"x","model":"glm-5.1","choices":[]}"#;
+        let out = transform_model_in_chunk(data, "glm-5.1", "Plan").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["model"], "Plan");
+    }
+
+    /// cr-105: 嵌套字段含 "glm-5.1" 不应被替换
+    #[test]
+    fn test_transform_model_does_not_touch_nested() {
+        let data = r#"{"id":"x","model":"glm-5.1","choices":[{"message":{"reasoning":"based on glm-5.1"}}]}"#;
+        let out = transform_model_in_chunk(data, "glm-5.1", "Plan").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["model"], "Plan");
+        // 嵌套的 "glm-5.1" 必须保持
+        assert_eq!(parsed["choices"][0]["message"]["reasoning"], "based on glm-5.1");
+    }
+
+    /// cr-105: 当 model 不匹配时不修改
+    #[test]
+    fn test_transform_model_no_match() {
+        let data = r#"{"id":"x","model":"other-model","choices":[]}"#;
+        let out = transform_model_in_chunk(data, "glm-5.1", "Plan").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["model"], "other-model");
+    }
+
+    /// cr-105: model 字段不是 string 类型（异常情况）不替换
+    #[test]
+    fn test_transform_model_non_string_model() {
+        let data = r#"{"model":123,"choices":[]}"#;
+        let out = transform_model_in_chunk(data, "glm-5.1", "Plan").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // 不替换，保持原值
+        assert_eq!(parsed["model"], 123);
+    }
+
+    /// cr-105: 非法 JSON 返回 None（保留原文，调用方应直接转发）
+    #[test]
+    fn test_transform_model_invalid_json() {
+        let data = "not json";
+        assert_eq!(transform_model_in_chunk(data, "glm-5.1", "Plan"), None);
+    }
+
+    /// cr-105: 不是 object（顶层是数组）返回 None
+    #[test]
+    fn test_transform_model_array_top_level() {
+        let data = r#"[1,2,3]"#;
+        assert_eq!(transform_model_in_chunk(data, "glm-5.1", "Plan"), None);
+    }
+
+    /// cr-105: 没有 model 字段返回 None
+    #[test]
+    fn test_transform_model_no_model_field() {
+        let data = r#"{"id":"x","choices":[]}"#;
+        assert_eq!(transform_model_in_chunk(data, "glm-5.1", "Plan"), None);
     }
 }
