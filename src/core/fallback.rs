@@ -38,15 +38,12 @@ pub async fn execute_with_fallback(
 
         tracing::info!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, "Trying backend");
 
-        match crate::backend::openai_compat::send_non_streaming(
-            client,
-            provider,
-            request,
-            &target.model,
-            timeout,
-        )
-        .await
-        {
+        let result = if provider.provider_type == "anthropic" {
+            crate::backend::anthropic_passthrough::send_anthropic_request(client, provider, request, &target.model).await
+        } else {
+            crate::backend::openai_compat::send_non_streaming(client, provider, request, &target.model, timeout).await
+        };
+        match result {
             Ok(response) => {
                 tracing::info!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, "Backend succeeded");
                 return Ok(FallbackResult {
@@ -161,6 +158,7 @@ mod tests {
             ProviderConfig {
                 base_url: "http://127.0.0.1:19999/v1".to_string(),
                 api_key: "key".to_string(),
+                provider_type: "openai".to_string(),
             },
         );
         let mut aliases = HashMap::new();

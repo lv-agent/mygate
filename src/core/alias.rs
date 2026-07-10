@@ -43,6 +43,7 @@ mod tests {
             ProviderConfig {
                 base_url: "https://glm.example.com/v1".to_string(),
                 api_key: "glm-key".to_string(),
+                provider_type: "openai".to_string(),
             },
         );
         providers.insert(
@@ -50,6 +51,7 @@ mod tests {
             ProviderConfig {
                 base_url: "https://ds.example.com/v1".to_string(),
                 api_key: "ds-key".to_string(),
+                provider_type: "openai".to_string(),
             },
         );
 
@@ -100,5 +102,46 @@ mod tests {
         let config = make_test_config();
         let result = resolve_alias(&config, "NonExistent");
         assert!(result.is_err());
+    }
+
+    /// cr-000 Polish: 验证 anthropic provider_type 在别名链路中能被解析
+    /// （不影响 resolve_alias 本身，但要确认 ProviderConfig::provider_type 字段
+    /// 对 anthropic 类型 provider 也能正常加载和参与排序）
+    #[test]
+    fn test_resolve_alias_with_anthropic_provider() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "anthropic-direct".to_string(),
+            ProviderConfig {
+                base_url: "https://api.anthropic.com".to_string(),
+                api_key: "sk-ant-test".to_string(),
+                provider_type: "anthropic".to_string(),
+            },
+        );
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "Plan".to_string(),
+            AliasConfig {
+                description: Some("uses anthropic direct".to_string()),
+                chain: vec![ChainEntry {
+                    provider: "anthropic-direct".to_string(),
+                    model: "claude-sonnet-4-5".to_string(),
+                    priority: 1,
+                }],
+            },
+        );
+        let config = AppConfig {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 8080,
+                timeout_seconds: 30,
+            },
+            providers,
+            aliases,
+        };
+        let chain = resolve_alias(&config, "Plan").unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].provider_name, "anthropic-direct");
+        assert_eq!(chain[0].model, "claude-sonnet-4-5");
     }
 }
