@@ -1,6 +1,8 @@
+use crate::backend::BackendAdapter;
 use crate::config::ProviderConfig;
 use crate::core::types::*;
 use crate::error::GatewayError;
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -776,5 +778,39 @@ mod tests {
         let req = req_with_sampling(None, None, None, None);
         let openai = to_openai_request(&req, "x");
         assert_eq!(openai.stream_options, None);
+    }
+}
+
+// =====================================================================
+// cr-201: OpenAI 兼容后端作为 BackendAdapter 实现
+// =====================================================================
+
+/// OpenAI 兼容后端 adapter。
+pub struct OpenAiCompatAdapter;
+
+#[async_trait]
+impl BackendAdapter for OpenAiCompatAdapter {
+    fn name(&self) -> &'static str { "openai_compat" }
+
+    async fn send(
+        &self,
+        client: &Client,
+        provider: &ProviderConfig,
+        request: &InternalRequest,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<InternalResponse, GatewayError> {
+        send_non_streaming(client, provider, request, model, timeout).await
+    }
+
+    async fn send_streaming(
+        &self,
+        client: &Client,
+        provider: &ProviderConfig,
+        request: &InternalRequest,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, GatewayError> {
+        send_streaming(client, provider, request, model, timeout).await
     }
 }

@@ -23,6 +23,7 @@ tokio-stream = "0.1"
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 async-stream = "0.3"
+async-trait = "0.1"
 
 [dev-dependencies]
 jsonschema = "0.30"

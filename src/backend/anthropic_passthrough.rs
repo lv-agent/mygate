@@ -1,7 +1,11 @@
 /// Anthropic passthrough backend — forwards Anthropic requests directly to the provider.
+use crate::backend::BackendAdapter;
 use crate::config::ProviderConfig;
 use crate::core::types::{ContentBlock, FunctionCall, InternalRequest, InternalResponse, Role, Usage};
 use crate::error::GatewayError;
+use async_trait::async_trait;
+use reqwest::Client;
+use std::time::Duration;
 
 /// 构造 Anthropic 协议请求 body（流式与非流式共用）
 fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> serde_json::Value {
@@ -216,6 +220,7 @@ mod tests {
             stop: None,
             seed: None,
             n: None,
+            stream_options: None,
         }
     }
 
@@ -255,6 +260,7 @@ mod tests {
             stop: None,
             seed: None,
             n: None,
+            stream_options: None,
         };
         let body = build_anthropic_body(&req, "m");
         assert_eq!(body["model"], "m");
@@ -262,5 +268,39 @@ mod tests {
         assert!(body.get("system").is_none());
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
+    }
+}
+
+// =====================================================================
+// cr-201: Anthropic 直通后端作为 BackendAdapter 实现
+// =====================================================================
+
+/// Anthropic 直通后端 adapter。
+pub struct AnthropicPassthroughAdapter;
+
+#[async_trait]
+impl BackendAdapter for AnthropicPassthroughAdapter {
+    fn name(&self) -> &'static str { "anthropic_passthrough" }
+
+    async fn send(
+        &self,
+        client: &Client,
+        provider: &ProviderConfig,
+        request: &InternalRequest,
+        model: &str,
+        _timeout: Duration,
+    ) -> Result<InternalResponse, GatewayError> {
+        send_anthropic_request(client, provider, request, model).await
+    }
+
+    async fn send_streaming(
+        &self,
+        client: &Client,
+        provider: &ProviderConfig,
+        request: &InternalRequest,
+        model: &str,
+        _timeout: Duration,
+    ) -> Result<reqwest::Response, GatewayError> {
+        send_anthropic_streaming_request(client, provider, request, model).await
     }
 }

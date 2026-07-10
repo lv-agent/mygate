@@ -7,6 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+/// cr-201: 通过 provider_type 选 adapter
+fn pick_adapter(provider_type: &str) -> Box<dyn crate::backend::BackendAdapter> {
+    crate::backend::adapter_for(provider_type)
+}
+
 #[derive(Debug)]
 pub struct FallbackResult {
     pub response: InternalResponse,
@@ -38,10 +43,10 @@ pub async fn execute_with_fallback(
 
         tracing::info!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, "Trying backend");
 
-        let result = if provider.provider_type == "anthropic" {
-            crate::backend::anthropic_passthrough::send_anthropic_request(client, provider, request, &target.model).await
-        } else {
-            crate::backend::openai_compat::send_non_streaming(client, provider, request, &target.model, timeout).await
+        // cr-201: 通过 trait 调度
+        let result = {
+            let adapter = pick_adapter(&provider.provider_type);
+            adapter.send(client, provider, request, &target.model, timeout).await
         };
         match result {
             Ok(response) => {
@@ -105,19 +110,13 @@ pub async fn execute_streaming_fallback(
 
         tracing::info!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, "Trying backend (streaming)");
 
-        let stream_result = if provider.provider_type == "anthropic" {
-            // cr-002/cr-004: Anthropic 类型后端的流式请求
-            crate::backend::anthropic_passthrough::send_anthropic_streaming_request(
-                client, provider, request, &target.model,
-            )
-            .await
-            .map(|resp| (resp, true)) // (resp, is_anthropic_native)
-        } else {
-            crate::backend::openai_compat::send_streaming(
-                client, provider, request, &target.model, timeout,
-            )
-            .await
-            .map(|resp| (resp, false))
+        // cr-201: 通过 trait 调度
+        let stream_result = {
+            let adapter = pick_adapter(&provider.provider_type);
+            adapter
+                .send_streaming(client, provider, request, &target.model, timeout)
+                .await
+                .map(|resp| (resp, true)) // 第二个字段占位（未来记录 adapter 来源）
         };
 
         match stream_result {
@@ -208,6 +207,14 @@ mod tests {
             tools: None,
             tool_choice: None,
             response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
+            stream_options: None,
         }
     }
 
@@ -233,5 +240,17 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("All fallback attempts exhausted"));
+    }
+
+    /// cr-201: 验证 provider_type → adapter 派发
+    #[test]
+    fn test_pick_adapter_dispatch() {
+        let a = pick_adapter("anthropic");
+        assert_eq!(a.name(), "anthropic_passthrough");
+        let o = pick_adapter("openai");
+        assert_eq!(o.name(), "openai_compat");
+        // 未知 provider_type 走 OpenAI 兼容（默认）
+        let u = pick_adapter("unknown-type");
+        assert_eq!(u.name(), "openai_compat");
     }
 }
