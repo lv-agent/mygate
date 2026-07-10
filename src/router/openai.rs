@@ -406,11 +406,25 @@ async fn create_streaming_response(
     let alias = internal_req.model_alias.clone();
     let target_model = target.model.clone();
 
+    // P0-2: 检测后端 SSE 协议（content-type）。Anthropic SSE 含 `event:` 行
+    // （实际 mock 是 text/plain 也可能误判），改为：Anthropic 数据中含 type/message_start
+    // 字段 → Anthropic 协议；其他 → OpenAI 协议。
+    let backend_content_type = backend_resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let is_anthropic_sse = backend_content_type.contains("event-stream")
+        && (backend_content_type.contains("anthropic")
+            || !backend_content_type.is_empty());
+
     let stream = async_stream::stream! {
         let mut byte_stream = backend_resp.bytes_stream();
         let mut buffer = String::new();
-        // Per-chunk timeout: if backend stops sending for 60s, abort the stream
         let chunk_timeout = std::time::Duration::from_secs(60);
+        // P0-2: 区分协议。简单启发：检测首个非空 data 行是否含 "type":"message_start"
+        let mut protocol_detected: Option<&'static str> = None;
         loop {
             match tokio::time::timeout(chunk_timeout, byte_stream.next()).await {
                 Ok(Some(chunk_result)) => match chunk_result {
@@ -429,10 +443,30 @@ async fn create_streaming_response(
                                 return;
                             }
                             if let Some(data) = trimmed.strip_prefix("data: ") {
-                                // cr-105: JSON 路径感知的 model 替换（替代原字符串 replace）
-                                let replaced = transform_model_in_chunk(data, &target_model, &alias)
-                                    .unwrap_or_else(|| data.to_string());
-                                yield Ok(Event::default().data(replaced));
+                                // P0-2: 协议检测（首个非空 data 决定）
+                                if protocol_detected.is_none() {
+                                    if data.contains("message_start") {
+                                        protocol_detected = Some("anthropic");
+                                    } else if data.contains("chat.completion.chunk") {
+                                        protocol_detected = Some("openai");
+                                    }
+                                }
+                                if protocol_detected == Some("anthropic") {
+                                    // P0-2: Anthropic → OpenAI 流式转换
+                                    if let Some(openai_chunk) =
+                                        anthropic_event_to_openai_chunk(data, &alias)
+                                    {
+                                        yield Ok(Event::default().data(openai_chunk));
+                                    }
+                                } else {
+                                    // OpenAI → OpenAI: 仅 model 字段替换
+                                    let replaced = transform_model_in_chunk(data, &target_model, &alias)
+                                        .unwrap_or_else(|| data.to_string());
+                                    yield Ok(Event::default().data(replaced));
+                                }
+                            } else if trimmed.starts_with("event: ") {
+                                // P0-2: Anthropic SSE event 行不直接 yield
+                                // （我们在 data 行里合成 OpenAI chunk）
                             } else {
                                 tracing::debug!(line = %trimmed, "Skipping non-SSE line from backend");
                             }
@@ -610,5 +644,92 @@ mod tests {
     fn test_transform_model_no_model_field() {
         let data = r#"{"id":"x","choices":[]}"#;
         assert_eq!(transform_model_in_chunk(data, "glm-5.1", "Plan"), None);
+    }
+}
+
+/// P0-2: Anthropic SSE 事件 → OpenAI SSE chunk 转换
+/// 接收 Anthropic 协议的 data: {...} 字符串，输出 OpenAI 协议的 data: {...} 字符串。
+/// 返回 None 表示不输出（不产生 OpenAI 事件的 Anthropic 事件）。
+fn anthropic_event_to_openai_chunk(data: &str, alias: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    let event_type = v.get("type")?.as_str()?;
+
+    match event_type {
+        // 跳过 message_start: 我们在第一个 text_delta 时合并 role
+        "message_start" => None,
+        // 跳过 content_block_start: 由 deltas 累积
+        "content_block_start" => None,
+        // 跳过 content_block_stop: 由 message_delta 处理 finish
+        "content_block_stop" => None,
+        // 跳过 message_stop: 由 message_delta + [DONE] 处理
+        "message_stop" => {
+            Some(serde_json::json!({
+                "id": "?",
+                "object": "chat.completion.chunk",
+                "created": 0u64,
+                "model": alias,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": null
+                }]
+            }).to_string())
+        }
+        // text_delta: 累积为 OpenAI delta.content（首次含 role: assistant）
+        "content_block_delta" => {
+            let index = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+            let text = v.get("delta").and_then(|d| d.get("text")).and_then(|t| t.as_str());
+            // 检测是否首次 text_delta：模型中 first_text_delta[index]
+            // 简化：每次都输出 chunk（重复的 role 字段 client 端会忽略）
+            let chunk = serde_json::json!({
+                "id": "?",
+                "object": "chat.completion.chunk",
+                "created": 0u64,
+                "model": alias,
+                "choices": [{
+                    "index": index,
+                    "delta": {
+                        "role": "assistant",
+                        "content": text.unwrap_or("")
+                    },
+                    "finish_reason": null
+                }]
+            });
+            Some(chunk.to_string())
+        }
+        // message_delta: 含 stop_reason → 转为 OpenAI finish_reason + content filter
+        "message_delta" => {
+            let stop_reason = v
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(|s| s.as_str());
+            let finish_reason = match stop_reason {
+                Some("end_turn") => Some("stop"),
+                Some("max_tokens") => Some("length"),
+                Some("tool_use") => Some("tool_calls"),
+                Some("stop_sequence") => Some("stop"),
+                _ => None,
+            };
+            if let Some(fr) = finish_reason {
+                let chunk = serde_json::json!({
+                    "id": "?",
+                    "object": "chat.completion.chunk",
+                    "created": 0u64,
+                    "model": alias,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": fr
+                    }]
+                });
+                Some(chunk.to_string())
+            } else {
+                None
+            }
+        }
+        // 暂不处理：tool_use（多模态支持 P0-2 后做）
+        "ping" => None,
+        "error" => Some(data.to_string()),
+        _ => None,
     }
 }

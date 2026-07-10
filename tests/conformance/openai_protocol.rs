@@ -195,3 +195,103 @@ priority = 1
     assert_eq!(received[0].body["tool_choice"]["type"], "function");
     assert_eq!(received[0].body["tool_choice"]["function"]["name"], "Read");
 }
+
+/// cr-P0-2: OpenAI 北向流式 + Anthropic 后端
+/// 验证：MyGate 自动检测后端 Anthropic SSE 格式，转换成 OpenAI SSE 给客户端
+#[tokio::test]
+async fn openai_to_anthropic_stream_conversion() {
+    let mock = MockBackend::new();
+    mock.push_script(common::MockResponse::StreamSse {
+        events: vec![
+            // Anthropic 协议格式
+            common::SseEvent {
+                event: Some("message_start".to_string()),
+                data: r#"{"type":"message_start","message":{"id":"msg_x","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0}}}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("content_block_start".to_string()),
+                data: r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("content_block_delta".to_string()),
+                data: r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("content_block_delta".to_string()),
+                data: r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("content_block_stop".to_string()),
+                data: r#"{"type":"content_block_stop","index":0}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("message_delta".to_string()),
+                data: r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("message_stop".to_string()),
+                data: r#"{"type":"message_stop"}"#.to_string(),
+            },
+        ],
+    });
+    let mock_url = mock.start().await;
+    let config: mygate::config::AppConfig = toml::from_str(&format!(
+        r#"
+[server]
+host = "127.0.0.1"
+port = 8080
+timeout_seconds = 30
+admin_token = ""
+
+[providers.mock]
+base_url = "{mock_url}"
+api_key = "test"
+provider_type = "anthropic"
+auth_style = "bearer"
+
+[aliases.XA]
+[[aliases.XA.chain]]
+provider = "mock"
+model = "c"
+priority = 1
+"#
+    ))
+    .unwrap();
+    let state = AppState {
+        config: Arc::new(RwLock::new(config)),
+        client: reqwest::Client::new(),
+    };
+    let app = mygate::server::build_router(state);
+
+    // OpenAI 客户端发流式请求
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "model":"XA",
+                "messages":[{"role":"user","content":"hi"}],
+                "stream":true,
+                "max_tokens":50
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), 10 * 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body).to_string();
+    let chunks: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("data: ")).collect();
+
+    // 验证：客户端应收到 OpenAI 格式 chunks（不是 Anthropic event: 格式）
+    let has_openai_chunk = chunks.iter().any(|c| c.contains("chat.completion.chunk"));
+    let has_anthropic_event = chunks.iter().any(|c| c.contains("\"type\":\"message_start\""));
+    assert!(has_openai_chunk, "客户端未收到 OpenAI 格式 chunks. chunks: {:?}", chunks);
+    assert!(!has_anthropic_event, "客户端不应收到 Anthropic 内部 event 格式");
+    // 流末尾必须 [DONE]
+    assert!(text.contains("data: [DONE]"), "缺 [DONE]");
+}
