@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "LLM API gateway with alias routing and fallback"
 
+[lib]
+name = "mygate"
+path = "src/lib.rs"
+
 [dependencies]
 axum = { version = "0.8", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
@@ -22,3 +26,6 @@ async-stream = "0.3"
 
 [dev-dependencies]
 jsonschema = "0.30"
+parking_lot = "0.12"
+insta = "1.40"
+tower = { version = "0.5", features = ["util"] }
