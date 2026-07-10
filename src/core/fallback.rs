@@ -159,6 +159,7 @@ mod tests {
                 base_url: "http://127.0.0.1:19999/v1".to_string(),
                 api_key: "key".to_string(),
                 provider_type: "openai".to_string(),
+                auth_style: "bearer".to_string(),
             },
         );
         let mut aliases = HashMap::new();
@@ -198,6 +199,8 @@ mod tests {
             temperature: None,
             max_tokens: None,
             tools: None,
+            tool_choice: None,
+            response_format: None,
         }
     }
 

@@ -68,12 +68,17 @@ pub async fn send_anthropic_request(
 
     tracing::info!(model=%model, url=%url, tools=%internal_req.tools.as_ref().map(|t|t.len()).unwrap_or(0), "Anthropic passthrough");
 
-    // MiniMax's Anthropic-compatible endpoint authenticates via `Authorization: Bearer`
-    // (NOT `x-api-key`), and rejects requests that carry an `anthropic-version` header
-    // with a misleading "carry the key in X-Api-Key" auth error. So we send Bearer only.
-    let resp = client.post(&url)
-        .header("Authorization", format!("Bearer {}", provider.api_key))
-        .header("Content-Type", "application/json")
+    // cr-003: 按 auth_style 选择鉴权头
+    // - "bearer"（默认）：`Authorization: Bearer <api_key>`（MiniMax / 多数中国厂商）
+    // - "anthropic"：用于真实 Anthropic API，需要 `x-api-key: <api_key>` + `anthropic-version: 2023-06-01`
+    let mut req_builder = client.post(&url).header("Content-Type", "application/json");
+    req_builder = match provider.auth_style.as_str() {
+        "anthropic" => req_builder
+            .header("x-api-key", &provider.api_key)
+            .header("anthropic-version", "2023-06-01"),
+        _ => req_builder.header("Authorization", format!("Bearer {}", provider.api_key)),
+    };
+    let resp = req_builder
         .json(&body)
         .timeout(std::time::Duration::from_secs(120))
         .send()

@@ -26,6 +26,21 @@ fn default_timeout() -> u64 {
 pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: String,
+    #[serde(default = "default_provider_type")]
+    pub provider_type: String,
+    /// cr-003: 鉴权风格。
+    /// - "bearer"（默认）：`Authorization: Bearer <api_key>`
+    /// - "anthropic"：用于真实 Anthropic API，发 `x-api-key: <api_key>` + `anthropic-version: 2023-06-01`
+    #[serde(default = "default_auth_style")]
+    pub auth_style: String,
+}
+
+fn default_provider_type() -> String {
+    "openai".to_string()
+}
+
+fn default_auth_style() -> String {
+    "bearer".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -157,5 +172,39 @@ priority = 1
         let config: Result<AppConfig, _> = toml::from_str(toml_str);
         let parsed = config.unwrap();
         assert!(parsed.validate().is_err());
+    }
+
+    /// cr-003 Polish: 验证 auth_style 字段的默认值和自定义值
+    #[test]
+    fn test_auth_style_default_is_bearer() {
+        let toml_str = r#"
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[providers.real-anthropic]
+base_url = "https://api.anthropic.com"
+api_key = "sk-ant-test"
+provider_type = "anthropic"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.providers["real-anthropic"].auth_style, "bearer");
+    }
+
+    #[test]
+    fn test_auth_style_explicit_anthropic() {
+        let toml_str = r#"
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[providers.real-anthropic]
+base_url = "https://api.anthropic.com"
+api_key = "sk-ant-test"
+provider_type = "anthropic"
+auth_style = "anthropic"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.providers["real-anthropic"].auth_style, "anthropic");
     }
 }
