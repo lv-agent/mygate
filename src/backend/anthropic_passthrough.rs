@@ -47,15 +47,23 @@ fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> Result<s
                 // cr-207: OpenAI ImageUrl (data: URL) → Anthropic image 块
                 let url = &image_url.url;
                 if let Some(rest) = url.strip_prefix("data:").and_then(|s| s.split_once(";base64,")) {
+                    // data: URL → Anthropic base64 source
                     let media_type = rest.0;
                     let data = rest.1;
                     serde_json::json!({
                         "type":"image",
                         "source":{"type":"base64","media_type":media_type,"data":data}
                     })
+                } else if url.starts_with("http://") || url.starts_with("https://") {
+                    // P2-4: HTTP(S) URL → Anthropic url source（2024-12+ 支持）
+                    serde_json::json!({
+                        "type":"image",
+                        "source":{"type":"url","url":url}
+                    })
                 } else {
-                    tracing::warn!(url_len = url.len(), "ImageUrl 非 data: URL 格式，anthropic 不支持 HTTP 图片，丢弃");
-                    serde_json::json!({"type":"text","text":"[image: HTTP URL not supported]"})
+                    // 非 data: 非 http(s): 降级为文本（不丢消息）
+                    tracing::warn!(url_len = url.len(), "ImageUrl 非 data: / http(s) 格式, 降级为文本");
+                    serde_json::json!({"type":"text","text":"[image: unsupported URL format]"})
                 }
             }
             // cr-204: document 块 → Anthropic document 块
@@ -498,9 +506,10 @@ mod tests {
         };
         let body = build_anthropic_body(&req, "m").unwrap();
         let content = &body["messages"][0]["content"][0];
-        // HTTP URL 降级为文本（不丢消息），让客户端能感知到
-        assert_eq!(content["type"], "text");
-        assert!(content["text"].as_str().unwrap().contains("HTTP URL not supported"));
+        // P2-4: HTTP URL → Anthropic url source（2024-12+ 支持）
+        assert_eq!(content["type"], "image");
+        assert_eq!(content["source"]["type"], "url");
+        assert_eq!(content["source"]["url"], "https://example.com/cat.png");
     }
 
     #[test]
