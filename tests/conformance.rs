@@ -8,3 +8,6 @@ mod common;
 
 #[path = "conformance/openai_protocol.rs"]
 mod openai_protocol;
+
+#[path = "conformance/metrics_endpoint.rs"]
+mod metrics_endpoint;

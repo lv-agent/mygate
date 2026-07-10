@@ -14,6 +14,7 @@ pub fn build_router(state: AppState) -> Router {
         // Admin endpoints
         .route("/admin/reload", post(reload_config))
         .route("/health", get(health_check))
+        .route("/metrics", get(crate::metrics::metrics_handler))
         .with_state(state)
 }
 

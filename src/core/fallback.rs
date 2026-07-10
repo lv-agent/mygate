@@ -2,9 +2,11 @@ use crate::config::AppConfig;
 use crate::core::alias::{self, ResolvedTarget};
 use crate::core::types::*;
 use crate::error::{should_fallback, GatewayError};
+use crate::metrics::metrics;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 /// cr-201: 通过 provider_type 选 adapter
@@ -23,6 +25,10 @@ pub async fn execute_with_fallback(
     config: Arc<RwLock<AppConfig>>,
     request: &InternalRequest,
 ) -> Result<FallbackResult, GatewayError> {
+    // cr-202: 度量
+    let start = Instant::now();
+    let m = metrics();
+
     let config = config.read().await;
     let chain = alias::resolve_alias(&config, &request.model_alias)?;
     let timeout = Duration::from_secs(config.server.timeout_seconds);
@@ -48,9 +54,35 @@ pub async fn execute_with_fallback(
             let adapter = pick_adapter(&provider.provider_type);
             adapter.send(client, provider, request, &target.model, timeout).await
         };
+        match &result {
+            Ok(_) => {
+                let duration = start.elapsed().as_secs_f64();
+                m.requests_total
+                    .with_label_values(&[&request.model_alias, "success"])
+                    .inc();
+                m.fallback_attempts_total
+                    .with_label_values(&[&request.model_alias, &target.provider_name, "success"])
+                    .inc();
+                m.request_duration_seconds
+                    .with_label_values(&[&request.model_alias, &target.provider_name])
+                    .observe(duration);
+                tracing::info!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, "Backend succeeded");
+            }
+            Err(GatewayError::BackendError { status, .. }) if should_fallback(*status) => {
+                m.fallback_attempts_total
+                    .with_label_values(&[&request.model_alias, &target.provider_name, "fallback"])
+                    .inc();
+                tracing::warn!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, status = status, "Backend failed, trying next");
+            }
+            Err(_) => {
+                m.fallback_attempts_total
+                    .with_label_values(&[&request.model_alias, &target.provider_name, "error"])
+                    .inc();
+                tracing::warn!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, error = ?result, "Backend failed, trying next");
+            }
+        }
         match result {
             Ok(response) => {
-                tracing::info!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, "Backend succeeded");
                 return Ok(FallbackResult {
                     response,
                     used_target: target.clone(),
@@ -60,7 +92,6 @@ pub async fn execute_with_fallback(
                 status,
                 ref body,
             }) if should_fallback(status) => {
-                tracing::warn!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, status = status, "Backend failed, trying next");
                 last_error = Some(GatewayError::BackendError {
                     status,
                     body: format!(
@@ -70,12 +101,15 @@ pub async fn execute_with_fallback(
                 });
             }
             Err(e) => {
-                tracing::warn!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, error = %e, "Backend failed, trying next");
                 last_error = Some(e);
             }
         }
     }
 
+    // 所有 fallback 都失败
+    m.requests_total
+        .with_label_values(&[&request.model_alias, "fallback_exhausted"])
+        .inc();
     Err(GatewayError::AllFallbacksExhausted(format!(
         "{} — last error: {}",
         request.model_alias,

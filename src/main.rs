@@ -2,6 +2,7 @@ mod backend;
 mod config;
 mod core;
 mod error;
+mod metrics;
 mod router;
 mod server;
 

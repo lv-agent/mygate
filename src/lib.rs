@@ -5,5 +5,6 @@ pub mod backend;
 pub mod config;
 pub mod core;
 pub mod error;
+pub mod metrics;
 pub mod router;
 pub mod server;
