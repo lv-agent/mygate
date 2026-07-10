@@ -418,21 +418,46 @@ async fn create_streaming_response(
 
 pub async fn reload_config(
     State(state): State<AppState>,
-) -> Result<impl IntoResponse, GatewayError> {
-    let config_path = std::env::var("MYGATE_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
-    let result = AppConfig::load(&config_path).map_err(|e| e.to_string());
-    match result {
-        Ok(new_config) => {
-            let alias_count = new_config.aliases.len();
-            let provider_count = new_config.providers.len();
-            *state.config.write().await = new_config;
-            tracing::info!("Config reloaded: {} aliases, {} providers", alias_count, provider_count);
-            let body = serde_json::json!({"status": "ok", "aliases": alias_count, "providers": provider_count});
-            Ok(axum::response::Json(body))
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, axum::response::Response> {
+    use axum::response::IntoResponse;
+    // cr-203: admin_token 鉴权
+    let config = state.config.read().await;
+    match &config.server.admin_token {
+        None => {
+            // 未配置 admin_token → 端点禁用
+            Ok((axum::http::StatusCode::NOT_FOUND, "admin endpoint disabled").into_response())
         }
-        Err(e) => {
-            tracing::error!("Config reload failed: {}", e);
-            Err(GatewayError::ConfigError(e))
+        Some(expected) => {
+            let provided = headers
+                .get("x-admin-token")
+                .and_then(|v| v.to_str().ok());
+            match provided {
+                Some(t) if t == expected => {
+                    // 鉴权通过，继续
+                    drop(config);
+                    let config_path = std::env::var("MYGATE_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
+                    let result = AppConfig::load(&config_path).map_err(|e| e.to_string());
+                    match result {
+                        Ok(new_config) => {
+                            let alias_count = new_config.aliases.len();
+                            let provider_count = new_config.providers.len();
+                            *state.config.write().await = new_config;
+                            tracing::info!("Config reloaded: {} aliases, {} providers", alias_count, provider_count);
+                            let body = serde_json::json!({"status": "ok", "aliases": alias_count, "providers": provider_count});
+                            Ok(axum::response::Json(body).into_response())
+                        }
+                        Err(e) => {
+                            tracing::error!("Config reload failed: {}", e);
+                            Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("reload error: {}", e)).into_response())
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!("Admin endpoint auth failed");
+                    Err((axum::http::StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token").into_response())
+                }
+            }
         }
     }
 }

@@ -11,3 +11,6 @@ mod openai_protocol;
 
 #[path = "conformance/metrics_endpoint.rs"]
 mod metrics_endpoint;
+
+#[path = "conformance/admin_auth.rs"]
+mod admin_auth;

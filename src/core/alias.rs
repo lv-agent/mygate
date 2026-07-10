@@ -82,6 +82,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 8080,
                 timeout_seconds: 30,
+                admin_token: None,
             },
             providers,
             aliases,
@@ -137,6 +138,7 @@ mod tests {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 8080,
+                admin_token: None,
                 timeout_seconds: 30,
             },
             providers,

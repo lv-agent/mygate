@@ -28,6 +28,7 @@ async fn metrics_endpoint_returns_prometheus_text() {
 host = "127.0.0.1"
 port = 8080
 timeout_seconds = 30
+admin_token = ""
 
 [providers.mock]
 base_url = "{mock_url}/v1"
@@ -92,6 +93,7 @@ async fn metrics_request_counter_increments() {
 host = "127.0.0.1"
 port = 8080
 timeout_seconds = 30
+admin_token = ""
 
 [providers.mock]
 base_url = "{mock_url}/v1"

@@ -16,6 +16,9 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    /// cr-203: 管理端点鉴权。None = 端点禁用（返回 404）
+    #[serde(default)]
+    pub admin_token: Option<String>,
 }
 
 fn default_timeout() -> u64 {

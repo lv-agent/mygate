@@ -45,6 +45,7 @@ async fn openai_simple_text_e2e() {
 host = "127.0.0.1"
 port = 8080
 timeout_seconds = 30
+admin_token = ""
 
 [providers.mock]
 base_url = "{mock_url}/v1"
@@ -141,6 +142,7 @@ async fn openai_tool_choice_specific_e2e() {
 host = "127.0.0.1"
 port = 8080
 timeout_seconds = 30
+admin_token = ""
 
 [providers.mock]
 base_url = "{mock_url}/v1"
