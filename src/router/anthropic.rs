@@ -759,4 +759,33 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert!(matches!(messages[0].role, Role::User));
     }
+
+    /// cr-205: 系统 array 形式带 cache_control → 当前实现只取 text，cache_control 被丢弃
+    /// 短期方案 A（已实施）：cache_control 不透传
+    /// 长期方案 B（待）：passthrough 到 Anthropic 后端需要 array 形式保留
+    #[test]
+    fn parse_anthropic_system_array_with_cache_control_drops_cache() {
+        let req = AnthropicMessagesRequest {
+            model: "Plan".to_string(),
+            max_tokens: Some(100),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("hi"),
+            }],
+            system: Some(serde_json::json!([
+                {"type": "text", "text": "Part 1", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Part 2"}
+            ])),
+            stream: false,
+            temperature: None,
+            tools: None,
+            tool_choice: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+        };
+        let (system, _) = parse_anthropic_messages(&req);
+        // 短期方案 A：cache_control 丢弃，system 文本拼接
+        assert_eq!(system, Some("Part 1\nPart 2".to_string()));
+    }
 }
