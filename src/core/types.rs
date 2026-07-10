@@ -102,6 +102,14 @@ pub struct InternalRequest {
     pub seed: Option<u64>,
     /// cr-103: 生成 completions 数（OpenAI only，MyGate 仅保证 n=1）
     pub n: Option<u32>,
+    /// cr-104: 流式选项（如 include_usage）
+    pub stream_options: Option<StreamOptions>,
+}
+
+/// cr-104: 流式选项
+#[derive(Debug, Clone)]
+pub struct StreamOptions {
+    pub include_usage: bool,
 }
 
 #[derive(Debug, Clone)]

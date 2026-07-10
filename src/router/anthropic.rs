@@ -286,6 +286,7 @@ pub async fn messages(
         stop: req.stop_sequences.clone(),
         seed: None,
         n: None,
+        stream_options: None, // cr-104: Anthropic 协议无此字段
     };
 
     tracing::info!(

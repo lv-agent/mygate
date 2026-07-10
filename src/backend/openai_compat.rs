@@ -37,6 +37,9 @@ struct OpenAIRequest {
     /// cr-103: 停止序列（OpenAI 接受 string 或 array；MyGate 统一为 array）
     #[serde(skip_serializing_if = "Option::is_none")]
     stop: Option<Vec<String>>,
+    /// cr-104: 流式选项
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -241,6 +244,9 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
         seed: req.seed,
         n: req.n,
         stop: req.stop.clone(),
+        stream_options: req.stream_options.as_ref().map(|o| {
+            serde_json::json!({"include_usage": o.include_usage})
+        }),
     }
 }
 
@@ -445,6 +451,7 @@ mod tests {
             stop: None,
             seed: None,
             n: None,
+            stream_options: None,
         };
         let openai = to_openai_request(&req, "glm-4-flash");
         assert_eq!(openai.model, "glm-4-flash");
@@ -476,6 +483,7 @@ mod tests {
             stop: None,
             seed: None,
             n: None,
+            stream_options: None,
         };
         let openai = to_openai_request(&req, "glm-5.1");
         assert_eq!(openai.messages.len(), 1);
@@ -502,6 +510,7 @@ mod tests {
             stop: None,
             seed: None,
             n: None,
+            stream_options: None,
         };
         let openai = to_openai_request(&req, "test-model");
         assert_eq!(openai.stream, Some(true));
@@ -564,6 +573,7 @@ mod tests {
             stop: None,
             seed: None,
             n: None,
+            stream_options: None,
             messages: vec![],
             stream: false,
             temperature: None,
@@ -636,6 +646,7 @@ mod tests {
             stop: None,
             seed: None,
             n: None,
+            stream_options: None,
         }
     }
 
@@ -688,6 +699,7 @@ mod tests {
             stop,
             seed: None,
             n: None,
+            stream_options: None,
         }
     }
 
@@ -725,5 +737,44 @@ mod tests {
         assert_eq!(openai.frequency_penalty, None);
         assert_eq!(openai.presence_penalty, None);
         assert_eq!(openai.stop, None);
+    }
+
+    // ===== cr-104: stream_options 透传 =====
+
+    /// cr-104: include_usage=true 序列化为 {"include_usage": true}
+    #[test]
+    fn test_stream_options_include_usage_true() {
+        let req = InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
+            stream_options: Some(StreamOptions { include_usage: true }),
+        };
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(
+            openai.stream_options,
+            Some(serde_json::json!({"include_usage": true}))
+        );
+    }
+
+    /// cr-104: None → 不输出 stream_options
+    #[test]
+    fn test_stream_options_absent() {
+        let req = req_with_sampling(None, None, None, None);
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.stream_options, None);
     }
 }

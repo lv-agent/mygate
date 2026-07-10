@@ -52,6 +52,14 @@ pub struct OpenAIChatRequest {
     /// cr-103: 停止序列。OpenAI 支持 string 或 array，统一为 Option<Vec<String>>
     #[serde(default)]
     pub stop: Option<StopField>,
+    /// cr-104: 流式选项
+    #[serde(default)]
+    pub stream_options: Option<OpenAIStreamOptions>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OpenAIStreamOptions {
+    pub include_usage: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -321,6 +329,10 @@ pub async fn chat_completions(
         stop: req.stop.clone().map(|s| s.into_vec()),
         seed: req.seed,
         n: req.n,
+        // cr-104: stream_options 透传
+        stream_options: req.stream_options.as_ref().map(|o| StreamOptions {
+            include_usage: o.include_usage.unwrap_or(false),
+        }),
     };
 
     if req.stream {
