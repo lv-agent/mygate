@@ -55,6 +55,9 @@ pub struct OpenAIChatRequest {
     /// cr-104: 流式选项
     #[serde(default)]
     pub stream_options: Option<OpenAIStreamOptions>,
+    /// cr-206: 用户标识（OpenAI 标准字段）
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -334,6 +337,8 @@ pub async fn chat_completions(
         stream_options: req.stream_options.as_ref().map(|o| StreamOptions {
             include_usage: o.include_usage.unwrap_or(false),
         }),
+        // cr-206: user 标识
+        user: req.user.clone(),
     };
 
     if req.stream {

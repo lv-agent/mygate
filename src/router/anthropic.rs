@@ -346,6 +346,7 @@ pub async fn messages(
         seed: None,
         n: None,
         stream_options: None, // cr-104: Anthropic 协议无此字段
+        user: None, // cr-206: Anthropic 协议 metadata，OpenAI user 字段不直接通用
     };
 
     tracing::info!(

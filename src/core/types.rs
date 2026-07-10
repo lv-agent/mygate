@@ -122,6 +122,8 @@ pub struct InternalRequest {
     pub n: Option<u32>,
     /// cr-104: 流式选项（如 include_usage）
     pub stream_options: Option<StreamOptions>,
+    /// cr-206: 用户标识
+    pub user: Option<String>,
 }
 
 /// cr-104: 流式选项

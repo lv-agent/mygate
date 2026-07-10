@@ -251,6 +251,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         }
     }
 
@@ -300,6 +301,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         };
         let body = build_anthropic_body(&req, "m");
         let content = &body["messages"][0]["content"][0];
@@ -341,6 +343,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         };
         let body = build_anthropic_body(&req, "m");
         let content = &body["messages"][0]["content"][0];
@@ -381,6 +384,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         };
         let body = build_anthropic_body(&req, "m");
         let content = &body["messages"][0]["content"][0];
@@ -419,6 +423,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         };
         let body = build_anthropic_body(&req, "m");
         let content = &body["messages"][0]["content"][0];
@@ -447,6 +452,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         };
         let body = build_anthropic_body(&req, "m");
         assert_eq!(body["model"], "m");

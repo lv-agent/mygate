@@ -42,6 +42,9 @@ struct OpenAIRequest {
     /// cr-104: 流式选项
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<serde_json::Value>,
+    /// cr-206: 用户标识
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -255,6 +258,8 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
         stream_options: req.stream_options.as_ref().map(|o| {
             serde_json::json!({"include_usage": o.include_usage})
         }),
+        // cr-206: user 标识
+        user: req.user.clone(),
     }
 }
 
@@ -461,6 +466,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         };
         let openai = to_openai_request(&req, "glm-4-flash");
         assert_eq!(openai.model, "glm-4-flash");
@@ -493,6 +499,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         };
         let openai = to_openai_request(&req, "glm-5.1");
         assert_eq!(openai.messages.len(), 1);
@@ -520,6 +527,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         };
         let openai = to_openai_request(&req, "test-model");
         assert_eq!(openai.stream, Some(true));
@@ -583,6 +591,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
             messages: vec![],
             stream: false,
             temperature: None,
@@ -656,6 +665,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         }
     }
 
@@ -709,6 +719,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: None,
+            user: None,
         }
     }
 
@@ -771,6 +782,7 @@ mod tests {
             seed: None,
             n: None,
             stream_options: Some(StreamOptions { include_usage: true }),
+            user: None,
         };
         let openai = to_openai_request(&req, "x");
         assert_eq!(
@@ -785,6 +797,43 @@ mod tests {
         let req = req_with_sampling(None, None, None, None);
         let openai = to_openai_request(&req, "x");
         assert_eq!(openai.stream_options, None);
+    }
+
+    // ===== cr-206: user 透传 =====
+
+    /// cr-206: user 标识透传
+    #[test]
+    fn test_user_pass_through() {
+        let req = InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
+            stream_options: None,
+            user: Some("user-12345".to_string()),
+        };
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.user, Some("user-12345".to_string()));
+    }
+
+    /// cr-206: None → 不输出 user 字段
+    #[test]
+    fn test_user_absent() {
+        let req = req_with_sampling(None, None, None, None);
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.user, None);
     }
 }
 
