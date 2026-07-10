@@ -20,10 +20,12 @@ pub struct Metrics {
     pub requests_total: CounterVec,
     pub fallback_attempts_total: CounterVec,
     pub request_duration_seconds: HistogramVec,
-    #[allow(dead_code)]
     pub active_streams: Gauge,
     #[allow(dead_code)]
     pub config_reload_total: CounterVec,
+    /// cr-202: token 用量统计（prompt / completion 按 alias）
+    #[allow(dead_code)]
+    pub tokens_total: CounterVec,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -62,11 +64,18 @@ pub fn metrics() -> &'static Metrics {
             &["trigger"]
         ).unwrap();
 
+        let tokens_total = register_counter_vec!(
+            "mygate_tokens_total",
+            "Token usage by alias and kind (prompt/completion)",
+            &["alias", "kind"]
+        ).unwrap();
+
         registry.register(Box::new(requests_total.clone())).unwrap();
         registry.register(Box::new(fallback_attempts_total.clone())).unwrap();
         registry.register(Box::new(request_duration_seconds.clone())).unwrap();
         registry.register(Box::new(active_streams.clone())).unwrap();
         registry.register(Box::new(config_reload_total.clone())).unwrap();
+        registry.register(Box::new(tokens_total.clone())).unwrap();
 
         Metrics {
             registry,
@@ -75,6 +84,7 @@ pub fn metrics() -> &'static Metrics {
             request_duration_seconds,
             active_streams,
             config_reload_total,
+            tokens_total,
         }
     })
 }

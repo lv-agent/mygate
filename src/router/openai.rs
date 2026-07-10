@@ -342,12 +342,55 @@ pub async fn chat_completions(
     };
 
     if req.stream {
+        // cr-202: active_streams gauge inc
+        crate::metrics::metrics().active_streams.inc();
         let stream = create_streaming_response(state, internal_req).await?;
-        Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
+        // 包装 stream：drop 时 dec
+        let guarded = ActiveStreamsGuard::new(stream);
+        Ok(Sse::new(guarded).keep_alive(KeepAlive::default()).into_response())
     } else {
         let result = fallback::execute_with_fallback(&state.client, state.config.clone(), &internal_req).await?;
+        // cr-202: tokens_total counter
+        let alias = internal_req.model_alias.clone();
+        let u = &result.response.usage;
+        if let Some(t) = u.prompt_tokens {
+            crate::metrics::metrics().tokens_total.with_label_values(&[&alias, "prompt"]).inc_by(t as f64);
+        }
+        if let Some(t) = u.completion_tokens {
+            crate::metrics::metrics().tokens_total.with_label_values(&[&alias, "completion"]).inc_by(t as f64);
+        }
         let response = to_openai_response(result.response);
         Ok(Json(response).into_response())
+    }
+}
+
+/// cr-202: 流式 stream 守卫，drop 时 dec `active_streams` gauge
+pub struct ActiveStreamsGuard<S> {
+    inner: S,
+    dec_on_drop: bool,
+}
+
+impl<S> ActiveStreamsGuard<S> {
+    pub fn new(inner: S) -> Self {
+        Self { inner, dec_on_drop: true }
+    }
+}
+
+impl<S> Drop for ActiveStreamsGuard<S> {
+    fn drop(&mut self) {
+        if self.dec_on_drop {
+            crate::metrics::metrics().active_streams.dec();
+        }
+    }
+}
+
+impl<S: futures::Stream + Unpin> futures::Stream for ActiveStreamsGuard<S> {
+    type Item = S::Item;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
     }
 }
 
@@ -448,6 +491,11 @@ pub async fn reload_config(
                             let alias_count = new_config.aliases.len();
                             let provider_count = new_config.providers.len();
                             *state.config.write().await = new_config;
+                            // cr-202: config_reload_total counter (http trigger)
+                            crate::metrics::metrics()
+                                .config_reload_total
+                                .with_label_values(&["http"])
+                                .inc();
                             tracing::info!("Config reloaded: {} aliases, {} providers", alias_count, provider_count);
                             let body = serde_json::json!({"status": "ok", "aliases": alias_count, "providers": provider_count});
                             Ok(axum::response::Json(body).into_response())

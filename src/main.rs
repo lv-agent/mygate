@@ -67,6 +67,11 @@ async fn main() {
                 Ok(new_config) => {
                     let count = new_config.aliases.len();
                     *config_for_sighup.write().await = new_config;
+                    // cr-202: config_reload_total counter
+                    mygate::metrics::metrics()
+                        .config_reload_total
+                        .with_label_values(&["sighup"])
+                        .inc();
                     tracing::info!("Config reloaded via SIGHUP: {} aliases", count);
                 }
                 Err(e) => tracing::error!("SIGHUP config reload failed: {}", e),
