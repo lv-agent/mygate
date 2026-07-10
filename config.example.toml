@@ -1,49 +1,108 @@
+# MyGate 配置示例
+# 详细南向 provider 文档见 veps/southbound/{provider}/
+
 [server]
 host = "127.0.0.1"
 port = 8080
 timeout_seconds = 30
 
-[providers.minimax]
-base_url = "https://api.minimax.chat/v1"
-api_key = "your-minimax-api-key"
+# ========== 闭源 API ==========
+
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+api_key = "sk-..."
+provider_type = "openai"
+auth_style = "bearer"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+api_key = "sk-ant-..."
+provider_type = "anthropic"
+auth_style = "anthropic"   # 真实 Anthropic API 用 x-api-key
+
+# ========== 国产 3 家 ==========
 
 [providers.glm]
 base_url = "https://open.bigmodel.cn/api/paas/v4"
-api_key = "your-glm-api-key"
+api_key = "..."
+provider_type = "openai"
+auth_style = "bearer"
 
 [providers.deepseek]
 base_url = "https://api.deepseek.com/v1"
-api_key = "your-deepseek-api-key"
+api_key = "sk-..."
+provider_type = "openai"
+auth_style = "bearer"
+
+[providers.minimax-openai]
+base_url = "https://api.minimaxi.com/v1"
+api_key = "..."
+provider_type = "openai"
+auth_style = "bearer"
+
+[providers.minimax-anthropic]
+base_url = "https://api.minimaxi.com"
+api_key = "..."
+provider_type = "anthropic"
+auth_style = "bearer"  # ⚠️ MiniMax Anthropic 端用 Bearer，不用 x-api-key
+
+# ========== 自部署（vLLM / SGLang） ==========
+
+[providers.vllm]
+base_url = "http://localhost:8000/v1"
+api_key = "EMPTY"
+provider_type = "openai"
+auth_style = "bearer"
+
+[providers.sglang-openai]
+base_url = "http://localhost:30000/v1"
+api_key = "EMPTY"
+provider_type = "openai"
+auth_style = "bearer"
+
+# ========== 3 个标准 alias ==========
 
 [aliases.Simple]
-description = "Simple tasks, cheap model"
-[[aliases.Simple.chain]]
-provider = "minimax"
-model = "MiniMax-M2.7"
-priority = 1
+description = "便宜快速，适合简单对话"
 [[aliases.Simple.chain]]
 provider = "glm"
 model = "glm-4-flash"
+priority = 1
+[[aliases.Simple.chain]]
+provider = "deepseek"
+model = "deepseek-chat"
 priority = 2
+[[aliases.Simple.chain]]
+provider = "minimax-openai"
+model = "MiniMax-M2.7"
+priority = 3
 
 [aliases.Code]
-description = "Code tasks"
+description = "代码任务"
 [[aliases.Code.chain]]
-provider = "deepseek"
-model = "deepseek-coder"
+provider = "anthropic"
+model = "claude-sonnet-4-5"
 priority = 1
+[[aliases.Code.chain]]
+provider = "openai"
+model = "gpt-4o"
+priority = 2
 [[aliases.Code.chain]]
 provider = "glm"
 model = "glm-4-plus"
-priority = 2
+priority = 3
 
 [aliases.Plan]
-description = "Planning / reasoning tasks"
+description = "推理 / 规划"
 [[aliases.Plan.chain]]
-provider = "glm"
-model = "glm-5.1"
+provider = "anthropic"
+model = "claude-opus-4-1"
 priority = 1
+[[aliases.Plan.chain]]
+provider = "openai"
+model = "o3-mini"
+priority = 2
 [[aliases.Plan.chain]]
 provider = "deepseek"
 model = "deepseek-reasoner"
-priority = 2
+priority = 3
