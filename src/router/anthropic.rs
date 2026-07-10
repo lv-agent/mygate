@@ -264,6 +264,7 @@ pub async fn messages(
     let internal_req = InternalRequest {
         model_alias: req.model.clone(),
         system,
+        response_format: None, // cr-102: Anthropic 协议无此字段，固定 None
         messages: internal_messages,
         stream: req.stream,
         temperature: req.temperature,

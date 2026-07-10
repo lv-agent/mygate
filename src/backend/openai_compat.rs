@@ -20,6 +20,9 @@ struct OpenAIRequest {
     /// cr-101: 工具选择策略。序列化为 string 或 object。
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
+    /// cr-102: 响应格式。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +112,11 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
             "type": "function",
             "function": {"name": name}
         }),
+    });
+    // cr-102: 内部 ResponseFormat 序列化
+    let response_format = req.response_format.as_ref().map(|rf| match rf {
+        ResponseFormat::Text => serde_json::json!({"type": "text"}),
+        ResponseFormat::JsonObject => serde_json::json!({"type": "json_object"}),
     });
     // cr-001: 如果有顶层 system 字段，预先追加为 messages[0] role=system
     let mut messages: Vec<OpenAIMessage> = Vec::new();
@@ -212,6 +220,7 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
         max_tokens: req.max_tokens,
         tools,
         tool_choice,
+        response_format,
     }
 }
 
@@ -408,6 +417,7 @@ mod tests {
             max_tokens: Some(100),
             tools: None,
             tool_choice: None,
+            response_format: None,
         };
         let openai = to_openai_request(&req, "glm-4-flash");
         assert_eq!(openai.model, "glm-4-flash");
@@ -431,6 +441,7 @@ mod tests {
             max_tokens: None,
             tools: None,
             tool_choice: None,
+            response_format: None,
         };
         let openai = to_openai_request(&req, "glm-5.1");
         assert_eq!(openai.messages.len(), 1);
@@ -449,6 +460,7 @@ mod tests {
             max_tokens: None,
             tools: None,
             tool_choice: None,
+            response_format: None,
         };
         let openai = to_openai_request(&req, "test-model");
         assert_eq!(openai.stream, Some(true));
@@ -503,6 +515,7 @@ mod tests {
         InternalRequest {
             model_alias: "P".to_string(),
             system: None,
+            response_format: None,
             messages: vec![],
             stream: false,
             temperature: None,
@@ -553,5 +566,45 @@ mod tests {
         let req = req_with_tool_choice(None);
         let openai = to_openai_request(&req, "x");
         assert_eq!(openai.tool_choice, None);
+    }
+
+    // ===== cr-102: response_format 序列化 =====
+
+    fn req_with_response_format(rf: Option<ResponseFormat>) -> InternalRequest {
+        InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            response_format: rf,
+        }
+    }
+
+    /// cr-102: ResponseFormat::Text → {"type":"text"}
+    #[test]
+    fn test_response_format_text() {
+        let req = req_with_response_format(Some(ResponseFormat::Text));
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.response_format, Some(serde_json::json!({"type":"text"})));
+    }
+
+    /// cr-102: ResponseFormat::JsonObject → {"type":"json_object"}
+    #[test]
+    fn test_response_format_json_object() {
+        let req = req_with_response_format(Some(ResponseFormat::JsonObject));
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.response_format, Some(serde_json::json!({"type":"json_object"})));
+    }
+
+    /// cr-102: None → 不输出 response_format 字段
+    #[test]
+    fn test_response_format_absent() {
+        let req = req_with_response_format(None);
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.response_format, None);
     }
 }

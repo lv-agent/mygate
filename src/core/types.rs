@@ -50,6 +50,17 @@ pub struct InternalTool {
     pub parameters: Option<serde_json::Value>,
 }
 
+/// cr-102: 响应格式。OpenAI 标准字段，Anthropic 无对应（不支持）。
+/// - `Text`       普通文本（默认）
+/// - `JsonObject` 强制 JSON 输出
+///
+/// 本期仅支持这两种；OpenAI 后续 json_schema 模式留 P2。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponseFormat {
+    Text,
+    JsonObject,
+}
+
 /// cr-101: 工具选择策略。规范化 OpenAI / Anthropic 两种协议的不同表示。
 /// - `Auto`      模型自决定（默认；OpenAI "auto" / Anthropic `{type:"auto"}`）
 /// - `None`      不调用工具（OpenAI "none" / Anthropic `{type:"none"}`）
@@ -78,6 +89,8 @@ pub struct InternalRequest {
     pub tools: Option<Vec<InternalTool>>,
     /// cr-101: 工具选择策略
     pub tool_choice: Option<ToolChoice>,
+    /// cr-102: 响应格式（OpenAI 协议字段）
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone)]

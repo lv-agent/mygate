@@ -35,6 +35,9 @@ pub struct OpenAIChatRequest {
     /// cr-101: 工具选择策略（OpenAI 协议）。可为 string ("auto"/"none"/"required") 或 object
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
+    /// cr-102: 响应格式。MyGate 仅支持 text / json_object。
+    #[serde(default)]
+    pub response_format: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,6 +206,16 @@ fn parse_openai_tool_choice(v: &serde_json::Value) -> Option<ToolChoice> {
     }
 }
 
+/// cr-102: 解析 OpenAI response_format。本期仅支持 text / json_object。
+fn parse_openai_response_format(v: &serde_json::Value) -> Option<ResponseFormat> {
+    let t = v.get("type").and_then(|x| x.as_str())?;
+    match t {
+        "text" => Some(ResponseFormat::Text),
+        "json_object" => Some(ResponseFormat::JsonObject),
+        _ => None, // 未知值（json_schema 等）返回 None，契约要求未知字段 400
+    }
+}
+
 fn to_openai_response(internal: InternalResponse) -> OpenAIChatResponse {
     let mut content_str = None;
     let mut tool_calls_out = None;
@@ -269,6 +282,7 @@ pub async fn chat_completions(
             parameters: t.function.parameters,
         }).collect()),
         tool_choice,
+        response_format: req.response_format.as_ref().and_then(parse_openai_response_format),
     };
 
     if req.stream {
