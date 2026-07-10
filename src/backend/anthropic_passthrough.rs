@@ -3,16 +3,8 @@ use crate::config::ProviderConfig;
 use crate::core::types::{ContentBlock, FunctionCall, InternalRequest, InternalResponse, Role, Usage};
 use crate::error::GatewayError;
 
-pub async fn send_anthropic_request(
-    client: &reqwest::Client,
-    provider: &ProviderConfig,
-    internal_req: &InternalRequest,
-    preferred_model: &str,
-) -> Result<InternalResponse, GatewayError> {
-    let base = provider.base_url.trim_end_matches('/');
-    let url = format!("{}/v1/messages", base);
-    let model = preferred_model;
-
+/// 构造 Anthropic 协议请求 body（流式与非流式共用）
+fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> serde_json::Value {
     // cr-001: system 不在 messages 里，而是顶层字段
     let mut messages: Vec<serde_json::Value> = Vec::new();
     for msg in &internal_req.messages {
@@ -65,19 +57,39 @@ pub async fn send_anthropic_request(
         };
         body["tool_choice"] = v;
     }
+    body
+}
+
+/// 构造带鉴权头的 reqwest RequestBuilder
+fn apply_auth(
+    builder: reqwest::RequestBuilder,
+    provider: &ProviderConfig,
+) -> reqwest::RequestBuilder {
+    // cr-003: 按 auth_style 选择鉴权头
+    match provider.auth_style.as_str() {
+        "anthropic" => builder
+            .header("x-api-key", &provider.api_key)
+            .header("anthropic-version", "2023-06-01"),
+        _ => builder.header("Authorization", format!("Bearer {}", provider.api_key)),
+    }
+}
+
+pub async fn send_anthropic_request(
+    client: &reqwest::Client,
+    provider: &ProviderConfig,
+    internal_req: &InternalRequest,
+    preferred_model: &str,
+) -> Result<InternalResponse, GatewayError> {
+    let base = provider.base_url.trim_end_matches('/');
+    let url = format!("{}/v1/messages", base);
+    let model = preferred_model;
+    let body = build_anthropic_body(internal_req, model);
 
     tracing::info!(model=%model, url=%url, tools=%internal_req.tools.as_ref().map(|t|t.len()).unwrap_or(0), "Anthropic passthrough");
 
-    // cr-003: 按 auth_style 选择鉴权头
-    // - "bearer"（默认）：`Authorization: Bearer <api_key>`（MiniMax / 多数中国厂商）
-    // - "anthropic"：用于真实 Anthropic API，需要 `x-api-key: <api_key>` + `anthropic-version: 2023-06-01`
-    let mut req_builder = client.post(&url).header("Content-Type", "application/json");
-    req_builder = match provider.auth_style.as_str() {
-        "anthropic" => req_builder
-            .header("x-api-key", &provider.api_key)
-            .header("anthropic-version", "2023-06-01"),
-        _ => req_builder.header("Authorization", format!("Bearer {}", provider.api_key)),
-    };
+    let req_builder = client.post(&url)
+        .header("Content-Type", "application/json");
+    let req_builder = apply_auth(req_builder, provider);
     let resp = req_builder
         .json(&body)
         .timeout(std::time::Duration::from_secs(120))
@@ -125,4 +137,106 @@ pub async fn send_anthropic_request(
             total_tokens: None,
         },
     })
+}
+
+/// cr-004: 流式请求。返回 reqwest::Response，body 是 Anthropic SSE 事件流。
+/// 调用方（router/anthropic.rs）作为 SSE 原样透传给北向客户端。
+/// 注意：当前实现不转换为 OpenAI SSE — 限制是仅 Anthropic 北向才能用 provider_type=anthropic 后端。
+pub async fn send_anthropic_streaming_request(
+    client: &reqwest::Client,
+    provider: &ProviderConfig,
+    internal_req: &InternalRequest,
+    preferred_model: &str,
+) -> Result<reqwest::Response, GatewayError> {
+    let base = provider.base_url.trim_end_matches('/');
+    let url = format!("{}/v1/messages", base);
+    let model = preferred_model;
+    let mut body = build_anthropic_body(internal_req, model);
+    // 流式标志
+    body["stream"] = serde_json::Value::Bool(true);
+
+    tracing::info!(model=%model, url=%url, tools=%internal_req.tools.as_ref().map(|t|t.len()).unwrap_or(0), "Anthropic passthrough (streaming)");
+
+    let req_builder = client.post(&url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream");
+    let req_builder = apply_auth(req_builder, provider);
+    let resp = req_builder
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| GatewayError::BackendError { status: 502, body: format!("request failed: {}", e) })?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_string());
+        return Err(GatewayError::BackendError { status: status.as_u16(), body });
+    }
+    Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::types::{ContentBlock, FunctionCall, InternalRequest, InternalMessage, Role, ToolChoice};
+
+    fn req_with_system_and_tool() -> InternalRequest {
+        InternalRequest {
+            model_alias: "Plan".to_string(),
+            system: Some("You are helpful".to_string()),
+            messages: vec![InternalMessage {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "hi".to_string() }],
+            }],
+            stream: false,
+            temperature: Some(0.5),
+            max_tokens: Some(1024),
+            tools: Some(vec![crate::core::types::InternalTool {
+                name: "Read".to_string(),
+                description: Some("Read file".to_string()),
+                parameters: Some(serde_json::json!({"type": "object"})),
+            }]),
+            tool_choice: Some(ToolChoice::Specific("Read".to_string())),
+            response_format: None,
+        }
+    }
+
+    /// cr-004: build_anthropic_body 包含 system 顶层、tools、tool_choice object
+    #[test]
+    fn test_build_anthropic_body_has_all_fields() {
+        let body = build_anthropic_body(&req_with_system_and_tool(), "claude-sonnet-4-5");
+        assert_eq!(body["model"], "claude-sonnet-4-5");
+        assert_eq!(body["max_tokens"], 1024);
+        assert_eq!(body["temperature"], 0.5);
+        assert_eq!(body["system"], "You are helpful");
+        assert!(body["messages"].is_array());
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert!(body["tools"].is_array());
+        assert_eq!(body["tools"][0]["name"], "Read");
+        assert_eq!(body["tool_choice"]["type"], "tool");
+        assert_eq!(body["tool_choice"]["name"], "Read");
+    }
+
+    /// cr-004: 无 system / tools / tool_choice 时 body 也不包含这些字段
+    #[test]
+    fn test_build_anthropic_body_minimal() {
+        let req = InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![],
+            stream: false,
+            temperature: None,
+            max_tokens: Some(100),
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+        };
+        let body = build_anthropic_body(&req, "m");
+        assert_eq!(body["model"], "m");
+        assert_eq!(body["max_tokens"], 100);
+        assert!(body.get("system").is_none());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
 }

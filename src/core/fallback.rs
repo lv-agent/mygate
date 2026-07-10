@@ -105,16 +105,23 @@ pub async fn execute_streaming_fallback(
 
         tracing::info!(alias = %request.model_alias, provider = %target.provider_name, model = %target.model, "Trying backend (streaming)");
 
-        match crate::backend::openai_compat::send_streaming(
-            client,
-            provider,
-            request,
-            &target.model,
-            timeout,
-        )
-        .await
-        {
-            Ok(resp) => return Ok((resp, target.clone())),
+        let stream_result = if provider.provider_type == "anthropic" {
+            // cr-002/cr-004: Anthropic 类型后端的流式请求
+            crate::backend::anthropic_passthrough::send_anthropic_streaming_request(
+                client, provider, request, &target.model,
+            )
+            .await
+            .map(|resp| (resp, true)) // (resp, is_anthropic_native)
+        } else {
+            crate::backend::openai_compat::send_streaming(
+                client, provider, request, &target.model, timeout,
+            )
+            .await
+            .map(|resp| (resp, false))
+        };
+
+        match stream_result {
+            Ok((resp, _is_anthropic)) => return Ok((resp, target.clone())),
             Err(GatewayError::BackendError {
                 status,
                 ref body,
