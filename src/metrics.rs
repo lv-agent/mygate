@@ -20,7 +20,9 @@ pub struct Metrics {
     pub requests_total: CounterVec,
     pub fallback_attempts_total: CounterVec,
     pub request_duration_seconds: HistogramVec,
+    #[allow(dead_code)]
     pub active_streams: Gauge,
+    #[allow(dead_code)]
     pub config_reload_total: CounterVec,
 }
 

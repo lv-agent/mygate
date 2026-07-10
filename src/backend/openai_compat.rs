@@ -149,7 +149,7 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
             });
         }
     }
-    let mut msg_iter = req.messages.iter().flat_map(|msg| {
+    let msg_iter = req.messages.iter().flat_map(|msg| {
         let role = match msg.role {
             Role::System => "system",
             Role::User => "user",
@@ -330,7 +330,7 @@ pub async fn send_streaming(
     provider: &ProviderConfig,
     request: &InternalRequest,
     model: &str,
-    timeout: Duration,
+    _timeout: Duration,  // 流式不设全局超时，用 per-chunk（spec §7.2）
 ) -> Result<reqwest::Response, GatewayError> {
     let mut openai_req = to_openai_request(request, model);
     openai_req.stream = Some(true);
@@ -382,6 +382,7 @@ pub async fn send_streaming(
     Ok(resp)
 }
 
+#[allow(dead_code)]
 pub fn parse_sse_line(line: &str, alias: &str) -> Option<Vec<StreamChunk>> {
     let data = line.trim_start_matches("data: ").trim();
     if data == "[DONE]" || data.is_empty() {

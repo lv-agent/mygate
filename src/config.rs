@@ -45,6 +45,7 @@ fn default_auth_style() -> String {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AliasConfig {
+    #[allow(dead_code)]
     pub description: Option<String>,
     pub chain: Vec<ChainEntry>,
 }

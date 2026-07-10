@@ -89,6 +89,7 @@ pub struct OpenAIChatMessage {
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAIToolDef {
+    #[allow(dead_code)]
     pub r#type: Option<String>,
     pub function: OpenAIToolFnDef,
 }

@@ -13,6 +13,7 @@ use std::time::Duration;
 #[async_trait]
 pub trait BackendAdapter: Send + Sync {
     /// 适配器标识（用于 logging / metrics）
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
 
     /// 非流式请求

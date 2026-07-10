@@ -130,6 +130,7 @@ pub struct Usage {
 #[derive(Debug, Clone)]
 pub struct InternalResponse {
     pub id: String,
+    #[allow(dead_code)]
     pub model: String,
     pub alias: String,
     pub content: Vec<ContentBlock>,
@@ -137,7 +138,8 @@ pub struct InternalResponse {
     pub finish_reason: Option<String>,
 }
 
-/// A single SSE chunk from a streaming response.
+/// A single SSE chunk from a streaming response. (预留，未来流式重构成单 chunk 处理时启用)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct StreamChunk {
     pub id: String,

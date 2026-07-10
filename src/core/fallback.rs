@@ -17,6 +17,7 @@ fn pick_adapter(provider_type: &str) -> Box<dyn crate::backend::BackendAdapter> 
 #[derive(Debug)]
 pub struct FallbackResult {
     pub response: InternalResponse,
+    #[allow(dead_code)]
     pub used_target: ResolvedTarget,
 }
 
