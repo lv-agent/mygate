@@ -142,8 +142,40 @@ pub async fn send_anthropic_request(
         .map_err(|e| GatewayError::BackendError { status: 502, body: format!("request failed: {}", e) })?;
 
     let status = resp.status();
-    let response_body: serde_json::Value = resp.json().await
-        .map_err(|e| GatewayError::BackendError { status: 502, body: format!("parse: {}", e) })?;
+    // P0-1 修复: 容忍非 JSON 响应（如 HTML 404、文本错误页）。先看 content-type：
+    // - application/json → 正常 JSON 解析
+    // - 其他 → 读 body 为文本，返回明确的错误信息（之前会 panic 报 "parse: expected value"）
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let response_body: serde_json::Value = if content_type.contains("application/json") {
+        resp.json()
+            .await
+            .map_err(|e| GatewayError::BackendError {
+                status: 502,
+                body: format!("json parse error: {}", e),
+            })?
+    } else {
+        // 非 JSON 响应：读 body 为文本 + 返回明确错误
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| GatewayError::BackendError {
+                status: 502,
+                body: format!("read body error: {}", e),
+            })?;
+        let preview: String = body_text.chars().take(200).collect();
+        return Err(GatewayError::BackendError {
+            status: status.as_u16(),
+            body: format!(
+                "non-JSON response (content-type={}): {}",
+                content_type, preview
+            ),
+        });
+    };
 
     if !status.is_success() {
         return Err(GatewayError::BackendError { status: 502, body: format!("{}: {}", status, response_body) });
