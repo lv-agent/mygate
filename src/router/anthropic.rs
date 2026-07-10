@@ -297,6 +297,24 @@ fn to_anthropic_response(internal: InternalResponse) -> AnthropicMessagesRespons
             },
         })
         .collect();
+    // 跨协议兼容（cr-301 cross_protocol 测试）：如果内容里有 ToolUse，
+    // 强制把 stop_reason 设为 Anthropic 词汇 "tool_use"，不管后端给的什么。
+    let has_tool = content
+        .iter()
+        .any(|b| matches!(b, AnthropicContentBlock::ToolUse { .. }));
+    let stop_reason = if has_tool {
+        Some("tool_use".to_string())
+    } else {
+        // 非 tool_use 时按 OpenAI → Anthropic 词汇映射
+        match internal.finish_reason.as_deref() {
+            Some("stop") => Some("end_turn".to_string()),
+            Some("length") => Some("max_tokens".to_string()),
+            Some("tool_calls") => Some("tool_use".to_string()),
+            Some(other) => Some(other.to_string()),
+            None => None,
+        }
+    };
+
     AnthropicMessagesResponse {
         id: internal.id,
         r#type: "message".to_string(),
@@ -307,7 +325,7 @@ fn to_anthropic_response(internal: InternalResponse) -> AnthropicMessagesRespons
             input_tokens: internal.usage.prompt_tokens.unwrap_or(0),
             output_tokens: internal.usage.completion_tokens.unwrap_or(0),
         }),
-        stop_reason: internal.finish_reason,
+        stop_reason,
     }
 }
 

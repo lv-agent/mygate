@@ -20,3 +20,6 @@ mod admin_auth;
 
 #[path = "conformance/sse_state_machine.rs"]
 mod sse_state_machine;
+
+#[path = "conformance/cross_protocol.rs"]
+mod cross_protocol;
