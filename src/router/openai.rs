@@ -32,6 +32,9 @@ pub struct OpenAIChatRequest {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
     pub tools: Option<Vec<OpenAIToolDef>>,
+    /// cr-101: 工具选择策略（OpenAI 协议）。可为 string ("auto"/"none"/"required") 或 object
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +179,30 @@ fn parse_openai_messages(messages: Vec<OpenAIChatMessage>) -> (Option<String>, V
     (system, internal_messages)
 }
 
+/// cr-101: 解析 OpenAI tool_choice（string 或 object）
+fn parse_openai_tool_choice(v: &serde_json::Value) -> Option<ToolChoice> {
+    match v {
+        serde_json::Value::String(s) => match s.as_str() {
+            "auto" => Some(ToolChoice::Auto),
+            "none" => Some(ToolChoice::None),
+            "required" => Some(ToolChoice::Any),
+            _ => None,
+        },
+        serde_json::Value::Object(_) => {
+            let t = v.get("type").and_then(|x| x.as_str());
+            let name = v
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str());
+            match (t, name) {
+                (Some("function"), Some(n)) => Some(ToolChoice::Specific(n.to_string())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn to_openai_response(internal: InternalResponse) -> OpenAIChatResponse {
     let mut content_str = None;
     let mut tool_calls_out = None;
@@ -228,6 +255,7 @@ pub async fn chat_completions(
     Json(req): Json<OpenAIChatRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     let (system, internal_messages) = parse_openai_messages(req.messages);
+    let tool_choice = req.tool_choice.as_ref().and_then(parse_openai_tool_choice);
     let internal_req = InternalRequest {
         model_alias: req.model.clone(),
         system,
@@ -240,6 +268,7 @@ pub async fn chat_completions(
             description: t.function.description,
             parameters: t.function.parameters,
         }).collect()),
+        tool_choice,
     };
 
     if req.stream {

@@ -23,6 +23,9 @@ pub struct AnthropicMessagesRequest {
     pub temperature: Option<f64>,
     pub system: Option<serde_json::Value>,
     pub tools: Option<Vec<AnthropicToolDef>>,
+    /// cr-101: 工具选择策略（Anthropic 协议，必为 object）
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,6 +199,21 @@ fn parse_anthropic_messages(req: &AnthropicMessagesRequest) -> (Option<String>, 
     (system, messages)
 }
 
+/// cr-101: 解析 Anthropic tool_choice（必为 object）
+fn parse_anthropic_tool_choice(v: &serde_json::Value) -> Option<ToolChoice> {
+    let t = v.get("type").and_then(|x| x.as_str())?;
+    match t {
+        "auto" => Some(ToolChoice::Auto),
+        "none" => Some(ToolChoice::None),
+        "any" => Some(ToolChoice::Any),
+        "tool" => {
+            let name = v.get("name").and_then(|n| n.as_str())?;
+            Some(ToolChoice::Specific(name.to_string()))
+        }
+        _ => None,
+    }
+}
+
 fn to_anthropic_response(internal: InternalResponse) -> AnthropicMessagesResponse {
     let content: Vec<AnthropicContentBlock> = internal
         .content
@@ -242,6 +260,7 @@ pub async fn messages(
             })
             .collect()
     });
+    let tool_choice = req.tool_choice.as_ref().and_then(parse_anthropic_tool_choice);
     let internal_req = InternalRequest {
         model_alias: req.model.clone(),
         system,
@@ -250,6 +269,7 @@ pub async fn messages(
         temperature: req.temperature,
         max_tokens: req.max_tokens,
         tools,
+        tool_choice,
     };
 
     tracing::info!(
@@ -599,6 +619,7 @@ mod tests {
             stream: false,
             temperature: None,
             tools: None,
+            tool_choice: None,
         };
         // 现状 RED：调用方期望 (Option<String>, Vec<InternalMessage>) 但当前函数返回 Vec<InternalMessage>
         // 期望系统被抽到顶层，messages 不含 Role::System
@@ -626,6 +647,7 @@ mod tests {
             stream: false,
             temperature: None,
             tools: None,
+            tool_choice: None,
         };
         let (system, messages) = parse_anthropic_messages(&req);
         assert_eq!(system, Some("Part 1\nPart 2".to_string()));
@@ -645,6 +667,7 @@ mod tests {
             stream: false,
             temperature: None,
             tools: None,
+            tool_choice: None,
         };
         let (system, messages) = parse_anthropic_messages(&req);
         assert_eq!(system, None);

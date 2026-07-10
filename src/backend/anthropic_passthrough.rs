@@ -55,6 +55,16 @@ pub async fn send_anthropic_request(
         })).collect();
         body["tools"] = serde_json::json!(anthropic_tools);
     }
+    // cr-101: tool_choice 序列化为 Anthropic object 格式
+    if let Some(ref tc) = internal_req.tool_choice {
+        let v = match tc {
+            crate::core::types::ToolChoice::Auto => serde_json::json!({"type":"auto"}),
+            crate::core::types::ToolChoice::None => serde_json::json!({"type":"none"}),
+            crate::core::types::ToolChoice::Any => serde_json::json!({"type":"any"}),
+            crate::core::types::ToolChoice::Specific(name) => serde_json::json!({"type":"tool","name":name}),
+        };
+        body["tool_choice"] = v;
+    }
 
     tracing::info!(model=%model, url=%url, tools=%internal_req.tools.as_ref().map(|t|t.len()).unwrap_or(0), "Anthropic passthrough");
 

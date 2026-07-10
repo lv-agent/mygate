@@ -17,6 +17,9 @@ struct OpenAIRequest {
     max_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAITool>>,
+    /// cr-101: 工具选择策略。序列化为 string 或 object。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +100,16 @@ pub struct OpenAIUsage {
 }
 
 fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
+    // cr-101: 把内部 ToolChoice 规范化转 OpenAI 协议格式
+    let tool_choice = req.tool_choice.as_ref().map(|tc| match tc {
+        ToolChoice::Auto => serde_json::Value::String("auto".to_string()),
+        ToolChoice::None => serde_json::Value::String("none".to_string()),
+        ToolChoice::Any => serde_json::Value::String("required".to_string()),
+        ToolChoice::Specific(name) => serde_json::json!({
+            "type": "function",
+            "function": {"name": name}
+        }),
+    });
     // cr-001: 如果有顶层 system 字段，预先追加为 messages[0] role=system
     let mut messages: Vec<OpenAIMessage> = Vec::new();
     if let Some(system) = &req.system {
@@ -198,6 +211,7 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
         temperature: req.temperature,
         max_tokens: req.max_tokens,
         tools,
+        tool_choice,
     }
 }
 
@@ -393,6 +407,7 @@ mod tests {
             temperature: Some(0.7),
             max_tokens: Some(100),
             tools: None,
+            tool_choice: None,
         };
         let openai = to_openai_request(&req, "glm-4-flash");
         assert_eq!(openai.model, "glm-4-flash");
@@ -415,6 +430,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             tools: None,
+            tool_choice: None,
         };
         let openai = to_openai_request(&req, "glm-5.1");
         assert_eq!(openai.messages.len(), 1);
@@ -432,6 +448,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             tools: None,
+            tool_choice: None,
         };
         let openai = to_openai_request(&req, "test-model");
         assert_eq!(openai.stream, Some(true));
@@ -478,5 +495,63 @@ mod tests {
     #[test]
     fn test_parse_sse_line_empty() {
         assert!(parse_sse_line("data: ", "Simple").is_none());
+    }
+
+    // ===== cr-101: tool_choice 序列化 =====
+
+    fn req_with_tool_choice(tc: Option<ToolChoice>) -> InternalRequest {
+        InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: tc,
+        }
+    }
+
+    /// cr-101: ToolChoice::Auto → "auto"
+    #[test]
+    fn test_tool_choice_auto() {
+        let req = req_with_tool_choice(Some(ToolChoice::Auto));
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.tool_choice, Some(serde_json::json!("auto")));
+    }
+
+    /// cr-101: ToolChoice::None → "none"
+    #[test]
+    fn test_tool_choice_none() {
+        let req = req_with_tool_choice(Some(ToolChoice::None));
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.tool_choice, Some(serde_json::json!("none")));
+    }
+
+    /// cr-101: ToolChoice::Any → "required"（OpenAI 协议特殊映射）
+    #[test]
+    fn test_tool_choice_any_to_required() {
+        let req = req_with_tool_choice(Some(ToolChoice::Any));
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.tool_choice, Some(serde_json::json!("required")));
+    }
+
+    /// cr-101: ToolChoice::Specific("X") → {type:function, function:{name:"X"}}
+    #[test]
+    fn test_tool_choice_specific() {
+        let req = req_with_tool_choice(Some(ToolChoice::Specific("Read".to_string())));
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(
+            openai.tool_choice,
+            Some(serde_json::json!({"type":"function","function":{"name":"Read"}}))
+        );
+    }
+
+    /// cr-101: None → 不输出 tool_choice 字段（skip_serializing_if）
+    #[test]
+    fn test_tool_choice_absent() {
+        let req = req_with_tool_choice(None);
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.tool_choice, None);
     }
 }

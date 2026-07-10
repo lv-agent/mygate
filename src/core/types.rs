@@ -50,6 +50,19 @@ pub struct InternalTool {
     pub parameters: Option<serde_json::Value>,
 }
 
+/// cr-101: 工具选择策略。规范化 OpenAI / Anthropic 两种协议的不同表示。
+/// - `Auto`      模型自决定（默认；OpenAI "auto" / Anthropic `{type:"auto"}`）
+/// - `None`      不调用工具（OpenAI "none" / Anthropic `{type:"none"}`）
+/// - `Any`       必须调用任一工具（OpenAI "required" / Anthropic `{type:"any"}`）
+/// - `Specific`  强制调用指定工具（OpenAI `{type:function,function:{name}}` / Anthropic `{type:"tool",name:"X"}`）
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolChoice {
+    Auto,
+    None,
+    Any,
+    Specific(String), // 工具名
+}
+
 /// Unified internal request format, protocol-agnostic.
 #[derive(Debug, Clone)]
 pub struct InternalRequest {
@@ -63,6 +76,8 @@ pub struct InternalRequest {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
     pub tools: Option<Vec<InternalTool>>,
+    /// cr-101: 工具选择策略
+    pub tool_choice: Option<ToolChoice>,
 }
 
 #[derive(Debug, Clone)]
