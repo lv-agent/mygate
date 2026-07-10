@@ -28,6 +28,24 @@ pub enum ContentBlock {
         tool_use_id: String,
         content: String,
     },
+    /// cr-204: PDF / document（仅 Anthropic 协议有；OpenAI 客户端不应发）
+    #[serde(rename = "document")]
+    Document {
+        /// base64 编码的 PDF 数据（Anthropic source.type=base64）
+        source: DocumentSource,
+    },
+}
+
+/// cr-204: 文档源（PDF base64 / text 文本）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DocumentSource {
+    #[serde(rename = "base64")]
+    Base64 { media_type: String, data: String },
+    #[serde(rename = "text")]
+    Text { media_type: String, data: String },
+    #[serde(rename = "url")]
+    Url { url: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

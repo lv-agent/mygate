@@ -173,6 +173,12 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
                         "image_url": { "url": image_url.url }
                     }]);
                 }
+                // cr-204: OpenAI 协议无 document 概念。降级为 text 描述。
+                ContentBlock::Document { source: _ } => {
+                    content = serde_json::Value::String(
+                        "[document: OpenAI protocol does not support document blocks]".to_string()
+                    );
+                }
                 ContentBlock::ToolResult { tool_use_id, content: result_content } => {
                     // Each tool_result must be its own message with role="tool"
                     tool_results.push(OpenAIMessage {

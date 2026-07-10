@@ -188,6 +188,65 @@ fn parse_anthropic_messages(req: &AnthropicMessagesRequest) -> (Option<String>, 
                                 content,
                             });
                         }
+                        // cr-204: document 块（PDF / text / url）
+                        "document" => {
+                            if let Some(source) = block.get("source") {
+                                let s_type = source
+                                    .get("type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                match s_type {
+                                    "base64" => {
+                                        let mt = source
+                                            .get("media_type")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("application/pdf")
+                                            .to_string();
+                                        let data = source
+                                            .get("data")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        content_blocks.push(ContentBlock::Document {
+                                            source: DocumentSource::Base64 {
+                                                media_type: mt,
+                                                data,
+                                            },
+                                        });
+                                    }
+                                    "text" => {
+                                        let mt = source
+                                            .get("media_type")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("text/plain")
+                                            .to_string();
+                                        let data = source
+                                            .get("data")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        content_blocks.push(ContentBlock::Document {
+                                            source: DocumentSource::Text {
+                                                media_type: mt,
+                                                data,
+                                            },
+                                        });
+                                    }
+                                    "url" => {
+                                        if let Some(url) =
+                                            source.get("url").and_then(|v| v.as_str())
+                                        {
+                                            content_blocks.push(ContentBlock::Document {
+                                                source: DocumentSource::Url {
+                                                    url: url.to_string(),
+                                                },
+                                            });
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }

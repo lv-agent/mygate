@@ -24,8 +24,6 @@ fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> serde_js
             ContentBlock::Text { text } => serde_json::json!({"type":"text","text":text}),
             ContentBlock::ImageUrl { image_url } => {
                 // cr-207: OpenAI ImageUrl (data: URL) → Anthropic image 块
-                // 格式：data:<media_type>;base64,<data> → {"type":"image","source":{"type":"base64","media_type":"...","data":"..."}}
-                // 非 data: URL（HTTP）暂不支持（Anthropic type=url 仅 2024-12 后部分支持）
                 let url = &image_url.url;
                 if let Some(rest) = url.strip_prefix("data:").and_then(|s| s.split_once(";base64,")) {
                     let media_type = rest.0;
@@ -35,10 +33,24 @@ fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> serde_js
                         "source":{"type":"base64","media_type":media_type,"data":data}
                     })
                 } else {
-                    // HTTP URL 或格式异常：降级为文本描述
                     tracing::warn!(url_len = url.len(), "ImageUrl 非 data: URL 格式，anthropic 不支持 HTTP 图片，丢弃");
                     serde_json::json!({"type":"text","text":"[image: HTTP URL not supported]"})
                 }
+            }
+            // cr-204: document 块 → Anthropic document 块
+            ContentBlock::Document { source } => {
+                let src = match source {
+                    crate::core::types::DocumentSource::Base64 { media_type, data } => serde_json::json!({
+                        "type":"base64","media_type":media_type,"data":data
+                    }),
+                    crate::core::types::DocumentSource::Text { media_type, data } => serde_json::json!({
+                        "type":"text","media_type":media_type,"data":data
+                    }),
+                    crate::core::types::DocumentSource::Url { url } => serde_json::json!({
+                        "type":"url","url":url
+                    }),
+                };
+                serde_json::json!({"type":"document","source":src})
             }
             ContentBlock::ToolCall { id, function } => serde_json::json!({
                 "type":"tool_use","id":id,"name":function.name,"input":serde_json::from_str::<serde_json::Value>(&function.arguments).unwrap_or_default()
@@ -297,6 +309,86 @@ mod tests {
         assert_eq!(content["source"]["data"], "iVBORw0KGgoAAAANSUhEUgAAAAUA");
     }
 
+    /// cr-204: document 块（PDF base64）→ Anthropic document 块
+    #[test]
+    fn test_document_base64_to_anthropic_block() {
+        use crate::core::types::{
+            ContentBlock, DocumentSource, InternalMessage, Role,
+        };
+        let req = InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![InternalMessage {
+                role: Role::User,
+                content: vec![ContentBlock::Document {
+                    source: DocumentSource::Base64 {
+                        media_type: "application/pdf".to_string(),
+                        data: "JVBERi0xLjQKJeLjz9MK".to_string(),
+                    },
+                }],
+            }],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
+            stream_options: None,
+        };
+        let body = build_anthropic_body(&req, "m");
+        let content = &body["messages"][0]["content"][0];
+        assert_eq!(content["type"], "document");
+        assert_eq!(content["source"]["type"], "base64");
+        assert_eq!(content["source"]["media_type"], "application/pdf");
+        assert_eq!(content["source"]["data"], "JVBERi0xLjQKJeLjz9MK");
+    }
+
+    /// cr-204: document 块（url）→ Anthropic document 块（type=url）
+    #[test]
+    fn test_document_url_to_anthropic_block() {
+        use crate::core::types::{
+            ContentBlock, DocumentSource, InternalMessage, Role,
+        };
+        let req = InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![InternalMessage {
+                role: Role::User,
+                content: vec![ContentBlock::Document {
+                    source: DocumentSource::Url {
+                        url: "https://example.com/spec.pdf".to_string(),
+                    },
+                }],
+            }],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
+            stream_options: None,
+        };
+        let body = build_anthropic_body(&req, "m");
+        let content = &body["messages"][0]["content"][0];
+        assert_eq!(content["type"], "document");
+        assert_eq!(content["source"]["type"], "url");
+        assert_eq!(content["source"]["url"], "https://example.com/spec.pdf");
+    }
+
     /// cr-207: ImageUrl 非 data: 格式（HTTP URL）→ 降级为文本提示，不丢消息
     #[test]
     fn test_image_http_url_degrades_to_text() {
@@ -334,6 +426,7 @@ mod tests {
         assert_eq!(content["type"], "text");
         assert!(content["text"].as_str().unwrap().contains("HTTP URL not supported"));
     }
+
     #[test]
     fn test_build_anthropic_body_minimal() {
         let req = InternalRequest {
