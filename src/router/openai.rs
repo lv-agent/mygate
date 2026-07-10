@@ -472,22 +472,23 @@ pub async fn reload_config(
 // =====================================================================
 
 /// cr-105: JSON 路径感知的 model 字段替换
-/// - 只替换顶层 `model` 字段（不替换嵌套字段，避免误伤）
+/// - **无条件**把顶层 `model` 替换为 alias（不依赖 target_model 匹配）
+/// - 因为后端可能规范化 model 名（如 deepseek-chat → deepseek-v4-flash），仅匹配会漏替换
 /// - 解析失败时回退到原文（不丢数据）
 /// - 不是合法 JSON 或不含 `model` 字段时返回 None（不修改）
 pub(crate) fn transform_model_in_chunk(
     data: &str,
-    target_model: &str,
+    _target_model: &str,
     alias: &str,
 ) -> Option<String> {
     let mut v: serde_json::Value = serde_json::from_str(data).ok()?;
     let obj = v.as_object_mut()?;
-    // 没 model 字段 → 视为非目标 chunk，原样转发
     if !obj.contains_key("model") {
         return None;
     }
     if let Some(m) = obj.get_mut("model") {
-        if m.as_str() == Some(target_model) {
+        // 只在 model 字段是 string 时替换（避免误伤 object/array）
+        if m.is_string() {
             *m = serde_json::Value::String(alias.to_string());
         }
     }
@@ -520,13 +521,14 @@ mod tests {
         assert_eq!(parsed["choices"][0]["message"]["reasoning"], "based on glm-5.1");
     }
 
-    /// cr-105: 当 model 不匹配时不修改
+    /// cr-105: 后端 model 与配置 model 不匹配时也替换为 alias（深度规范化场景）
+    /// 例：配置 deepseek-chat，后端实际返回 deepseek-v4-flash
     #[test]
-    fn test_transform_model_no_match() {
-        let data = r#"{"id":"x","model":"other-model","choices":[]}"#;
-        let out = transform_model_in_chunk(data, "glm-5.1", "Plan").unwrap();
+    fn test_transform_model_replaces_even_when_backend_normalizes() {
+        let data = r#"{"id":"x","model":"deepseek-v4-flash","choices":[]}"#;
+        let out = transform_model_in_chunk(data, "deepseek-chat", "Simple").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(parsed["model"], "other-model");
+        assert_eq!(parsed["model"], "Simple");
     }
 
     /// cr-105: model 字段不是 string 类型（异常情况）不替换
