@@ -22,6 +22,24 @@ fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> serde_js
         };
         let content = msg.content.iter().map(|block| match block {
             ContentBlock::Text { text } => serde_json::json!({"type":"text","text":text}),
+            ContentBlock::ImageUrl { image_url } => {
+                // cr-207: OpenAI ImageUrl (data: URL) → Anthropic image 块
+                // 格式：data:<media_type>;base64,<data> → {"type":"image","source":{"type":"base64","media_type":"...","data":"..."}}
+                // 非 data: URL（HTTP）暂不支持（Anthropic type=url 仅 2024-12 后部分支持）
+                let url = &image_url.url;
+                if let Some(rest) = url.strip_prefix("data:").and_then(|s| s.split_once(";base64,")) {
+                    let media_type = rest.0;
+                    let data = rest.1;
+                    serde_json::json!({
+                        "type":"image",
+                        "source":{"type":"base64","media_type":media_type,"data":data}
+                    })
+                } else {
+                    // HTTP URL 或格式异常：降级为文本描述
+                    tracing::warn!(url_len = url.len(), "ImageUrl 非 data: URL 格式，anthropic 不支持 HTTP 图片，丢弃");
+                    serde_json::json!({"type":"text","text":"[image: HTTP URL not supported]"})
+                }
+            }
             ContentBlock::ToolCall { id, function } => serde_json::json!({
                 "type":"tool_use","id":id,"name":function.name,"input":serde_json::from_str::<serde_json::Value>(&function.arguments).unwrap_or_default()
             }),
@@ -240,7 +258,82 @@ mod tests {
         assert_eq!(body["tool_choice"]["name"], "Read");
     }
 
-    /// cr-004: 无 system / tools / tool_choice 时 body 也不包含这些字段
+    /// cr-207: ImageUrl (data: URL) → Anthropic image 块
+    #[test]
+    fn test_image_data_url_to_anthropic_block() {
+        use crate::core::types::{ContentBlock, ImageUrlContent, InternalMessage, Role};
+        let req = InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![InternalMessage {
+                role: Role::User,
+                content: vec![ContentBlock::ImageUrl {
+                    image_url: ImageUrlContent {
+                        url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA".to_string(),
+                        detail: None,
+                    },
+                }],
+            }],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
+            stream_options: None,
+        };
+        let body = build_anthropic_body(&req, "m");
+        let content = &body["messages"][0]["content"][0];
+        assert_eq!(content["type"], "image");
+        assert_eq!(content["source"]["type"], "base64");
+        assert_eq!(content["source"]["media_type"], "image/png");
+        assert_eq!(content["source"]["data"], "iVBORw0KGgoAAAANSUhEUgAAAAUA");
+    }
+
+    /// cr-207: ImageUrl 非 data: 格式（HTTP URL）→ 降级为文本提示，不丢消息
+    #[test]
+    fn test_image_http_url_degrades_to_text() {
+        use crate::core::types::{ContentBlock, ImageUrlContent, InternalMessage, Role};
+        let req = InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![InternalMessage {
+                role: Role::User,
+                content: vec![ContentBlock::ImageUrl {
+                    image_url: ImageUrlContent {
+                        url: "https://example.com/cat.png".to_string(),
+                        detail: None,
+                    },
+                }],
+            }],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
+            stream_options: None,
+        };
+        let body = build_anthropic_body(&req, "m");
+        let content = &body["messages"][0]["content"][0];
+        // HTTP URL 降级为文本（不丢消息），让客户端能感知到
+        assert_eq!(content["type"], "text");
+        assert!(content["text"].as_str().unwrap().contains("HTTP URL not supported"));
+    }
     #[test]
     fn test_build_anthropic_body_minimal() {
         let req = InternalRequest {
