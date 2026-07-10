@@ -23,6 +23,20 @@ struct OpenAIRequest {
     /// cr-102: 响应格式。
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
+    /// cr-103: 采样参数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frequency_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    n: Option<u32>,
+    /// cr-103: 停止序列（OpenAI 接受 string 或 array；MyGate 统一为 array）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -221,6 +235,12 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
         tools,
         tool_choice,
         response_format,
+        top_p: req.top_p,
+        frequency_penalty: req.frequency_penalty,
+        presence_penalty: req.presence_penalty,
+        seed: req.seed,
+        n: req.n,
+        stop: req.stop.clone(),
     }
 }
 
@@ -418,6 +438,13 @@ mod tests {
             tools: None,
             tool_choice: None,
             response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
         };
         let openai = to_openai_request(&req, "glm-4-flash");
         assert_eq!(openai.model, "glm-4-flash");
@@ -442,6 +469,13 @@ mod tests {
             tools: None,
             tool_choice: None,
             response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
         };
         let openai = to_openai_request(&req, "glm-5.1");
         assert_eq!(openai.messages.len(), 1);
@@ -461,6 +495,13 @@ mod tests {
             tools: None,
             tool_choice: None,
             response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
         };
         let openai = to_openai_request(&req, "test-model");
         assert_eq!(openai.stream, Some(true));
@@ -516,6 +557,13 @@ mod tests {
             model_alias: "P".to_string(),
             system: None,
             response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
             messages: vec![],
             stream: false,
             temperature: None,
@@ -581,6 +629,13 @@ mod tests {
             tools: None,
             tool_choice: None,
             response_format: rf,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
         }
     }
 
@@ -606,5 +661,69 @@ mod tests {
         let req = req_with_response_format(None);
         let openai = to_openai_request(&req, "x");
         assert_eq!(openai.response_format, None);
+    }
+
+    // ===== cr-103: 采样参数序列化 =====
+
+    fn req_with_sampling(
+        top_p: Option<f64>,
+        freq: Option<f64>,
+        pres: Option<f64>,
+        stop: Option<Vec<String>>,
+    ) -> InternalRequest {
+        InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            top_p,
+            top_k: None,
+            frequency_penalty: freq,
+            presence_penalty: pres,
+            stop,
+            seed: None,
+            n: None,
+        }
+    }
+
+    /// cr-103: top_p 透传
+    #[test]
+    fn test_top_p_pass_through() {
+        let req = req_with_sampling(Some(0.9), None, None, None);
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.top_p, Some(0.9));
+    }
+
+    /// cr-103: frequency_penalty / presence_penalty 透传
+    #[test]
+    fn test_penalties_pass_through() {
+        let req = req_with_sampling(None, Some(0.5), Some(-0.5), None);
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.frequency_penalty, Some(0.5));
+        assert_eq!(openai.presence_penalty, Some(-0.5));
+    }
+
+    /// cr-103: stop 序列透传（Vec）
+    #[test]
+    fn test_stop_pass_through() {
+        let req = req_with_sampling(None, None, None, Some(vec!["END".to_string(), "STOP".to_string()]));
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.stop, Some(vec!["END".to_string(), "STOP".to_string()]));
+    }
+
+    /// cr-103: 全 None 时不输出字段（skip_serializing_if）
+    #[test]
+    fn test_sampling_absent() {
+        let req = req_with_sampling(None, None, None, None);
+        let openai = to_openai_request(&req, "x");
+        assert_eq!(openai.top_p, None);
+        assert_eq!(openai.frequency_penalty, None);
+        assert_eq!(openai.presence_penalty, None);
+        assert_eq!(openai.stop, None);
     }
 }

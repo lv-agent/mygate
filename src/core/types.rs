@@ -91,6 +91,17 @@ pub struct InternalRequest {
     pub tool_choice: Option<ToolChoice>,
     /// cr-102: 响应格式（OpenAI 协议字段）
     pub response_format: Option<ResponseFormat>,
+    /// cr-103: 采样参数
+    pub top_p: Option<f64>,
+    pub top_k: Option<u32>,
+    pub frequency_penalty: Option<f64>,
+    pub presence_penalty: Option<f64>,
+    /// cr-103: 停止序列。OpenAI `stop`（string|array）和 Anthropic `stop_sequences`（array）统一为 Option<Vec<String>>
+    pub stop: Option<Vec<String>>,
+    /// cr-103: 随机种子（OpenAI only，Anthropic 不支持）
+    pub seed: Option<u64>,
+    /// cr-103: 生成 completions 数（OpenAI only，MyGate 仅保证 n=1）
+    pub n: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

@@ -26,6 +26,13 @@ pub struct AnthropicMessagesRequest {
     /// cr-101: 工具选择策略（Anthropic 协议，必为 object）
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
+    /// cr-103: 采样参数
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    #[serde(default)]
+    pub stop_sequences: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,6 +278,14 @@ pub async fn messages(
         max_tokens: req.max_tokens,
         tools,
         tool_choice,
+        top_p: req.top_p,
+        top_k: req.top_k,
+        // cr-103: OpenAI 专属字段，Anthropic 客户端不发 → None
+        frequency_penalty: None,
+        presence_penalty: None,
+        stop: req.stop_sequences.clone(),
+        seed: None,
+        n: None,
     };
 
     tracing::info!(
@@ -621,6 +636,9 @@ mod tests {
             temperature: None,
             tools: None,
             tool_choice: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
         };
         // 现状 RED：调用方期望 (Option<String>, Vec<InternalMessage>) 但当前函数返回 Vec<InternalMessage>
         // 期望系统被抽到顶层，messages 不含 Role::System
@@ -649,6 +667,9 @@ mod tests {
             temperature: None,
             tools: None,
             tool_choice: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
         };
         let (system, messages) = parse_anthropic_messages(&req);
         assert_eq!(system, Some("Part 1\nPart 2".to_string()));
@@ -669,6 +690,9 @@ mod tests {
             temperature: None,
             tools: None,
             tool_choice: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
         };
         let (system, messages) = parse_anthropic_messages(&req);
         assert_eq!(system, None);

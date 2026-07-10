@@ -38,6 +38,36 @@ pub struct OpenAIChatRequest {
     /// cr-102: 响应格式。MyGate 仅支持 text / json_object。
     #[serde(default)]
     pub response_format: Option<serde_json::Value>,
+    /// cr-103: 采样参数
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f64>,
+    #[serde(default)]
+    pub presence_penalty: Option<f64>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub n: Option<u32>,
+    /// cr-103: 停止序列。OpenAI 支持 string 或 array，统一为 Option<Vec<String>>
+    #[serde(default)]
+    pub stop: Option<StopField>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum StopField {
+    Single(String),
+    Array(Vec<String>),
+}
+
+impl StopField {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            StopField::Single(s) => vec![s],
+            StopField::Array(v) => v,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,6 +313,14 @@ pub async fn chat_completions(
         }).collect()),
         tool_choice,
         response_format: req.response_format.as_ref().and_then(parse_openai_response_format),
+        top_p: req.top_p,
+        // cr-103: Anthropic 专属字段，OpenAI 客户端不发 → None
+        top_k: None,
+        frequency_penalty: req.frequency_penalty,
+        presence_penalty: req.presence_penalty,
+        stop: req.stop.clone().map(|s| s.into_vec()),
+        seed: req.seed,
+        n: req.n,
     };
 
     if req.stream {

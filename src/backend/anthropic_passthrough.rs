@@ -41,6 +41,16 @@ fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> serde_js
         }
     }
     if let Some(temp) = internal_req.temperature { body["temperature"] = temp.into(); }
+    // cr-103: Anthropic 采样参数
+    if let Some(top_p) = internal_req.top_p { body["top_p"] = top_p.into(); }
+    if let Some(top_k) = internal_req.top_k { body["top_k"] = top_k.into(); }
+    if let Some(ref stop) = internal_req.stop {
+        if !stop.is_empty() {
+            body["stop_sequences"] = serde_json::Value::Array(
+                stop.iter().map(|s| serde_json::Value::String(s.clone())).collect()
+            );
+        }
+    }
     if let Some(ref tools) = internal_req.tools {
         let anthropic_tools: Vec<serde_json::Value> = tools.iter().map(|t| serde_json::json!({
             "name": t.name, "description": t.description, "input_schema": t.parameters,
@@ -199,6 +209,13 @@ mod tests {
             }]),
             tool_choice: Some(ToolChoice::Specific("Read".to_string())),
             response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
         }
     }
 
@@ -231,6 +248,13 @@ mod tests {
             tools: None,
             tool_choice: None,
             response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
         };
         let body = build_anthropic_body(&req, "m");
         assert_eq!(body["model"], "m");
