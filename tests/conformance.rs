@@ -9,8 +9,14 @@ mod common;
 #[path = "conformance/openai_protocol.rs"]
 mod openai_protocol;
 
+#[path = "conformance/anthropic_protocol.rs"]
+mod anthropic_protocol;
+
 #[path = "conformance/metrics_endpoint.rs"]
 mod metrics_endpoint;
 
 #[path = "conformance/admin_auth.rs"]
 mod admin_auth;
+
+#[path = "conformance/sse_state_machine.rs"]
+mod sse_state_machine;
