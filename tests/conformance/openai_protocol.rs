@@ -197,7 +197,6 @@ priority = 1
 }
 
 /// cr-P0-2: OpenAI 北向流式 + Anthropic 后端
-/// 验证：MyGate 自动检测后端 Anthropic SSE 格式，转换成 OpenAI SSE 给客户端
 #[tokio::test]
 async fn openai_to_anthropic_stream_conversion() {
     let mock = MockBackend::new();
@@ -294,4 +293,42 @@ priority = 1
     assert!(!has_anthropic_event, "客户端不应收到 Anthropic 内部 event 格式");
     // 流末尾必须 [DONE]
     assert!(text.contains("data: [DONE]"), "缺 [DONE]");
+}
+
+/// cr-411: GLM 风格错误响应（缺 type 字段）应该被识别
+#[test]
+fn test_parse_error_body_glm_style() {
+    let body = r#"{"error":{"code":"401","message":"令牌已过期"}}"#;
+    let parsed = mygate::backend::openai_compat::parse_error_body(body);
+    assert!(parsed.is_some(), "GLM 错误应能解析");
+    let (typ, msg) = parsed.unwrap();
+    assert_eq!(typ, "401", "type 字段缺失时 fallback 到 code");
+    assert!(msg.contains("令牌"), "message 应能提取");
+}
+
+/// cr-411: 标准 OpenAI 错误响应应该被识别
+#[test]
+fn test_parse_error_body_openai_standard() {
+    let body = r#"{"error":{"message":"Invalid API key","type":"invalid_request_error","code":"401"}}"#;
+    let parsed = mygate::backend::openai_compat::parse_error_body(body);
+    assert!(parsed.is_some(), "标准 OpenAI 错误应能解析");
+    let (typ, msg) = parsed.unwrap();
+    assert_eq!(typ, "invalid_request_error");
+    assert!(msg.contains("Invalid"));
+}
+
+/// cr-411: 非错误 JSON（普通成功响应）不应该返回 Some
+#[test]
+fn test_parse_error_body_success_response() {
+    let body = r#"{"id":"x","choices":[{"message":{"content":"hi"}}]}"#;
+    let parsed = mygate::backend::openai_compat::parse_error_body(body);
+    assert!(parsed.is_none(), "正常成功响应不应被认为是错误");
+}
+
+/// cr-411: 非 JSON body 应该让 parse_error_body 返回 None（让上游走 non-JSON 处理）
+#[test]
+fn test_parse_error_body_non_json() {
+    let body = "Authentication Fails (governor)";
+    let parsed = mygate::backend::openai_compat::parse_error_body(body);
+    assert!(parsed.is_none(), "非 JSON 应该返回 None");
 }

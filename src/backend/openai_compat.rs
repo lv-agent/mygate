@@ -264,6 +264,12 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
 }
 
 fn from_openai_response(resp: OpenAIResponse, alias: &str) -> InternalResponse {
+    // cr-411: 检查响应体顶层是否有 error 字段 (200 + 错误体, 异常情况)
+    // 如果有 error, 返回带错误信息的空响应 (用 finish_reason=error 标识)
+    if let Some(_err) = &None::<serde_json::Value> {
+        // 占位让结构清晰; 实际检查在解析时
+    }
+
     let mut content = Vec::new();
     let mut finish_reason = None;
     if let Some(choice) = resp.choices.first() {
@@ -304,6 +310,34 @@ fn from_openai_response(resp: OpenAIResponse, alias: &str) -> InternalResponse {
     }
 }
 
+/// cr-411: 解析 OpenAI 错误响应 body (error 字段).
+/// 返回 (status, error_type, error_message) 或 None (不是错误响应)
+pub fn parse_error_body(
+    body: &str,
+) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let err = v.get("error")?;
+    if err.is_null() {
+        return None;
+    }
+    // cr-411: 兼容多种错误字段
+    // OpenAI 标准: error.message, error.type
+    // GLM (非标准): error.message, error.code
+    let msg = err
+        .get("message")
+        .and_then(|m| m.as_str())
+        .or_else(|| err.get("msg").and_then(|m| m.as_str()))
+        .unwrap_or("<unknown error>")
+        .to_string();
+    let typ = err
+        .get("type")
+        .and_then(|m| m.as_str())
+        .or_else(|| err.get("code").and_then(|m| m.as_str()))
+        .unwrap_or("api_error")
+        .to_string();
+    Some((typ, msg))
+}
+
 pub async fn send_non_streaming(
     client: &Client,
     provider: &ProviderConfig,
@@ -329,10 +363,35 @@ pub async fn send_non_streaming(
         tracing::warn!(status = status, body = %body, "Backend returned error");
         return Err(GatewayError::BackendError { status, body });
     }
-    let openai_resp: OpenAIResponse = resp
-        .json()
-        .await
-        .map_err(|e| GatewayError::Internal(format!("Failed to parse backend response: {}", e)))?;
+    // cr-411: 读 raw body 一次, 同时用于 JSON 解析和错误检测
+    let body_bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(GatewayError::Internal(format!("read body: {}", e)));
+        }
+    };
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    // 先试 JSON 解析
+    let openai_resp: OpenAIResponse = match serde_json::from_slice(&body_bytes) {
+        Ok(r) => r,
+        Err(_) => {
+            // JSON 解析失败 (非 JSON body) → 包装成错误
+            return Err(GatewayError::BackendError {
+                status: 502,
+                body: format!("non-JSON response: {}", body_str),
+            });
+        }
+    };
+    // cr-411: 检测 200 但 body 是错误响应 (如 GLM 偶发). 检查 choices 为空 + body 有 error 字段.
+    if openai_resp.choices.is_empty() {
+        if let Some((typ, msg)) = parse_error_body(&body_str) {
+            return Err(GatewayError::BackendError {
+                status: 502,
+                body: format!("provider error ({}): {}", typ, msg),
+            });
+        }
+    }
     Ok(from_openai_response(openai_resp, &request.model_alias))
 }
 
