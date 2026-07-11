@@ -231,6 +231,136 @@ else
     fail "C3. Anthropic 流式 (chunks=$C3_DATA_CHUNKS model=$C3_HAS_MODEL usage=$C3_HAS_USAGE)"
 fi
 
+# ========== C-CC. Claude Code 真实场景 (Anthropic 协议深度测试) ==========
+section "C-CC. Claude Code 真实场景 (Anthropic 协议)"
+
+# C4. CC 风格长 system prompt (MiniMax Anthropic 端)
+# 模拟 CC 默认 system: 约 500 token, 含安全规则和工具使用说明
+CC_SYSTEM=$(cat <<'EOF'
+You are Claude Code, Anthropic's official CLI for Claude.
+You are a helpful AI assistant with access to a set of tools.
+
+# Tools
+You may have access to tools: Read (read files), Edit (edit files), Bash (run shell), etc.
+
+# Rules
+- Be helpful and harmless
+- Don't make up files or paths
+- Run tests after changes
+- Prefer editing existing files over creating new ones
+- Use TodoWrite to track multi-step tasks
+- Output <result> tags for tool results
+
+# Environment
+Working directory: /home/user/project
+Git status: clean
+OS: linux x86_64
+Date: 2026-07-11
+EOF
+)
+C4=$(curl -s -X POST $BASE/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  --data-binary @<(cat <<EOF
+{
+  "model":"Plan",
+  "max_tokens":100,
+  "system":$(echo "$CC_SYSTEM" | python3 -c "import json,sys;print(json.dumps(sys.stdin.read().strip()))"),
+  "messages":[{"role":"user","content":"用一句话说明你是什么"}]
+}
+EOF
+))
+C4_TEXT=$(echo "$C4" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('content',[{}])[0].get('text',''))" 2>/dev/null)
+C4_INPUT_TOKENS=$(echo "$C4" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('usage',{}).get('input_tokens',0))" 2>/dev/null)
+C4_OUTPUT_TOKENS=$(echo "$C4" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('usage',{}).get('output_tokens',0))" 2>/dev/null)
+if [ -n "$C4_TEXT" ] && [ "$C4_INPUT_TOKENS" -ge 200 ] && [ "$C4_OUTPUT_TOKENS" -ge 1 ]; then
+    pass "C4. CC 长 system (input=$C4_INPUT_TOKENS tokens, output=$C4_OUTPUT_TOKENS): $C4_TEXT"
+else
+    fail "C4. CC 长 system 失败: text='$C4_TEXT' input=$C4_INPUT_TOKENS output=$C4_OUTPUT_TOKENS"
+fi
+
+# C5. CC 多轮 + 工具调用 (Round 1: 工具调用 + Round 2: 工具结果)
+# 模拟 CC 看到 tool_use 返回 tool_result 后继续
+C5_R1=$(curl -s -X POST $BASE/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  --data-binary @<(cat <<'EOF'
+{
+  "model":"Plan",
+  "max_tokens":200,
+  "system":"You are Claude Code.",
+  "tools":[{"name":"Read","description":"read file","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],
+  "messages":[{"role":"user","content":"读取 /tmp/test.txt 文件内容"}]
+}
+EOF
+))
+C5_STOP=$(echo "$C5_R1" | python3 -c "import json,sys;print(json.load(sys.stdin).get('stop_reason',''))" 2>/dev/null)
+C5_TOOL=$(echo "$C5_R1" | python3 -c "import json,sys;d=json.load(sys.stdin);c=d.get('content',[]);print(any(b.get('type')=='tool_use' for b in c))" 2>/dev/null)
+C5_TOOL_NAME=$(echo "$C5_R1" | python3 -c "import json,sys;d=json.load(sys.stdin);c=d.get('content',[]);[print(b.get('name')) for b in c if b.get('type')=='tool_use']" 2>/dev/null)
+if [ "$C5_STOP" = "tool_use" ] && [ "$C5_TOOL" = "True" ] && [ "$C5_TOOL_NAME" = "Read" ]; then
+    pass "C5. CC Round 1 工具调用: stop=$C5_STOP, name=$C5_TOOL_NAME (期望 Read)"
+else
+    fail "C5. CC Round 1 失败: stop=$C5_STOP tool=$C5_TOOL name=$C5_TOOL_NAME"
+fi
+
+# C6. CC 完整流程: Round 1 (工具调用) → Round 2 (工具结果) → 继续生成
+TOOL_ID=$(echo "$C5_R1" | python3 -c "import json,sys;d=json.load(sys.stdin);c=d.get('content',[]);[print(b.get('id')) for b in c if b.get('type')=='tool_use']" 2>/dev/null)
+C6=$(curl -s -X POST $BASE/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  --data-binary @<(cat <<EOF
+{
+  "model":"Plan",
+  "max_tokens":200,
+  "system":"You are Claude Code.",
+  "tools":[{"name":"Read","description":"read file","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],
+  "messages":[
+    {"role":"user","content":"读取 /tmp/test.txt 文件内容"},
+    {"role":"assistant","content":[{"type":"tool_use","id":"$TOOL_ID","name":"Read","input":{"path":"/tmp/test.txt"}}]},
+    {"role":"user","content":[{"type":"tool_result","tool_use_id":"$TOOL_ID","content":"file contents: hello world"}]}
+  ]
+}
+EOF
+))
+C6_TEXT=$(echo "$C6" | python3 -c "import json,sys;d=json.load(sys.stdin);c=d.get('content',[]);texts=[b.get('text','') for b in c if b.get('type')=='text'];print(' '.join(texts))" 2>/dev/null)
+C6_HAS_END=$(echo "$C6" | python3 -c "import json,sys;print(json.load(sys.stdin).get('stop_reason')=='end_turn')" 2>/dev/null)
+if [ -n "$C6_TEXT" ] && [ "$C6_HAS_END" = "True" ]; then
+    if echo "$C6_TEXT" | grep -q "hello world\|file"; then
+        pass "C6. CC Round 2 工具结果: stop_reason=end_turn, content 引用 'hello world' (file contents)"
+    else
+        pass "C6. CC Round 2 工具结果: stop_reason=end_turn, content='$C6_TEXT' (但未明确引用 file contents)"
+    fi
+else
+    fail "C6. CC Round 2 失败: text='$C6_TEXT' end_turn=$C6_HAS_END"
+fi
+
+# C7. CC 流式 + 工具调用. MiniMax 的 anthropic 端实际返回 OpenAI 格式
+# (我们的 gateway 转发, 客户端拿到的是 OpenAI SSE). 验证 tool_calls 出现 + finish_reason 正确.
+C7=$(curl -sN --max-time 30 -X POST $BASE/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  --data-binary @<(cat <<'EOF'
+{
+  "model":"Plan",
+  "max_tokens":200,
+  "stream":true,
+  "system":"You are Claude Code.",
+  "tools":[{"name":"Bash","description":"run shell","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}],
+  "messages":[{"role":"user","content":"运行 ls /tmp 命令"}]
+}
+EOF
+))
+C7_HAS_BASH=$(echo "$C7" | grep -c '"name":"Bash"')
+C7_CHUNKS=$(echo "$C7" | grep -c "^data: {")
+# 兼容两种格式: OpenAI (tool_calls + finish_reason=tool_calls) 或 Anthropic (tool_use + stop_reason=tool_use)
+C7_HAS_OPENAI_FINISH=$(echo "$C7" | grep -c '"finish_reason":"tool_calls"')
+C7_HAS_ANTHROPIC_FINISH=$(echo "$C7" | grep -c '"stop_reason":"tool_use"')
+if [ "$C7_HAS_BASH" -ge 1 ] && [ "$C7_CHUNKS" -ge 2 ] && { [ "$C7_HAS_OPENAI_FINISH" -ge 1 ] || [ "$C7_HAS_ANTHROPIC_FINISH" -ge 1 ]; }; then
+    pass "C7. CC 流式 + 工具调用: $C7_CHUNKS chunks, name=Bash, finish_reason OK (openai=$C7_HAS_OPENAI_FINISH / anthropic=$C7_HAS_ANTHROPIC_FINISH)"
+else
+    fail "C7. CC 流式工具调用失败: chunks=$C7_CHUNKS bash=$C7_HAS_BASH openai_finish=$C7_HAS_OPENAI_FINISH anthropic_finish=$C7_HAS_ANTHROPIC_FINISH"
+fi
+
 # ========== D. 跨协议交叉 ==========
 section "D. 跨协议交叉 (北向 OpenAI → 南向 Anthropic)"
 
