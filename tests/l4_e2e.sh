@@ -62,6 +62,13 @@ provider = "deepseek"
 model = "deepseek-reasoner"
 priority = 2
 
+# X2O: Anthropic 协议北向 -> OpenAI 后端 (跨协议反向, cr-310)
+[aliases.X2O]
+[[aliases.X2O.chain]]
+provider = "deepseek"
+model = "deepseek-chat"
+priority = 1
+
 # 流式 4xx 错误测试用
 [aliases.Broken]
 [[aliases.Broken.chain]]
@@ -251,8 +258,24 @@ else
     fail "D1. 跨协议失败 (model=$D1_MODEL chunks=$D1_CHUNKS done=$D1_HAS_DONE)"
 fi
 
-# D2. Anthropic 客户端 → 强制走 minimax-openai 后端 (需 test alias, 跳过 - 用 fallback chain)
-log "  (跳过 D2: 需专用 alias, 见 [aliases.Anthropic2OpenAI] 但已用 minimax-anthropic 链)"
+# D2. Anthropic 客户端 (CC) → OpenAI 后端 (deepseek) - 跨协议反向
+# 需要专门的 alias 才能强制走 openai 后端, 不被 minimax-anthropic 抢走
+D2=$(curl -s -X POST $BASE/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model":"X2O",
+    "max_tokens":50,
+    "messages":[{"role":"user","content":"hi"}]
+  }' 2>&1)
+D2_MODEL=$(echo "$D2" | python3 -c "import json,sys;print(json.load(sys.stdin).get('model','-'))" 2>/dev/null)
+D2_STOP=$(echo "$D2" | python3 -c "import json,sys;print(json.load(sys.stdin).get('stop_reason','-'))" 2>/dev/null)
+D2_CONTENT=$(echo "$D2" | python3 -c "import json,sys;c=json.load(sys.stdin).get('content',[{}])[0];print(c.get('text','') if isinstance(c, dict) else str(c)[:60])" 2>/dev/null)
+if [ "$D2_MODEL" = "X2O" ] && [ "$D2_STOP" = "end_turn" ] && [ -n "$D2_CONTENT" ]; then
+    pass "D2. Anthropic→OpenAI 端 (CC 跨协议反向): model=$D2_MODEL, stop=$D2_STOP, content='$D2_CONTENT'"
+else
+    fail "D2. Anthropic→OpenAI 失败: model=$D2_MODEL stop=$D2_STOP content='$D2_CONTENT' raw='$(echo $D2 | head -c 200)'"
+fi
 
 # ========== E. Fallback chain ==========
 section "E. Fallback chain (alias Simple 走 DeepSeek)"
