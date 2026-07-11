@@ -1,3 +1,5 @@
+/dist/
 /target
-config.toml
 /veps
+config.toml
+dist/

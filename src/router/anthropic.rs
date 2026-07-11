@@ -437,8 +437,6 @@ async fn create_anthropic_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::*;
-    use std::collections::HashMap;
 
     /// cr-001 RED: 当前 parse_anthropic_messages 把 system 塞进 Role::System 消息，
     /// 这是协议错误。Anthropic /v1/messages 要求 system 是顶层字段，不是消息。

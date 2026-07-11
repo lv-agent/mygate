@@ -409,15 +409,12 @@ async fn create_streaming_response(
     // P0-2: 检测后端 SSE 协议（content-type）。Anthropic SSE 含 `event:` 行
     // （实际 mock 是 text/plain 也可能误判），改为：Anthropic 数据中含 type/message_start
     // 字段 → Anthropic 协议；其他 → OpenAI 协议。
-    let backend_content_type = backend_resp
+    let _backend_content_type = backend_resp
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let is_anthropic_sse = backend_content_type.contains("event-stream")
-        && (backend_content_type.contains("anthropic")
-            || !backend_content_type.is_empty());
 
     let stream = async_stream::stream! {
         let mut byte_stream = backend_resp.bytes_stream();

@@ -17,6 +17,7 @@ pub enum GatewayError {
     BackendError { status: u16, body: String },
 
     #[error("Config error: {0}")]
+    #[allow(dead_code)]
     ConfigError(String),
 
     #[error("Internal error: {0}")]

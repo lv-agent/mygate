@@ -27,19 +27,35 @@
 
 ## 快速开始
 
-### 1. 复制配置
+### 1. 构建
 
 ```bash
-cp config.example.toml config.toml
-vi config.toml  # 填 API key
+./build.sh          # release 构建，产物在 dist/
+./build.sh debug    # debug 构建
 ```
 
-### 2. 启动
+构建产物：
+```
+dist/
+├── mygate              # 二进制
+├── config.example.toml # 配置模板
+└── run.sh              # 启动脚本 (自动从 config.example.toml 生成 config.toml)
+```
+
+### 2. 配置
 
 ```bash
-./target/release/mygate
-# 或 debug 模式:
-RUST_LOG=info,mygate=debug ./target/release/mygate
+cd dist/
+cp config.example.toml config.toml  # build.sh 已经为你做了这一步
+vi config.toml                       # 填 API key
+```
+
+### 3. 启动
+
+```bash
+./run.sh                              # dist/ 目录下
+# 或手动:
+RUST_LOG=info,mygate=debug ./mygate   # 从 dist/ 目录
 ```
 
 ### 3. 测试
@@ -105,6 +121,54 @@ model = "MiniMax-M3"
 priority = 2
 ```
 
+## Claude Code 集成
+
+MyGate 最大的价值：**CC 不再需要任何 API key，所有 key 和路由在 MyGate 侧管理**。
+
+### 配置
+
+在项目根目录创建 `.claude/settings.local.json`：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080",
+    "ANTHROPIC_AUTH_TOKEN": "mygate",
+    "ANTHROPIC_MODEL": "Plan",
+    "ANTHROPIC_SMALL_FAST_MODEL": "Simple",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "Plan",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "Code",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Simple",
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+```
+
+### 模型映射
+
+| CC 角色 | 环境变量 | MyGate Alias | 后端路由 |
+|---------|----------|-------------|---------|
+| 默认模型 | `ANTHROPIC_MODEL` | `Plan` | anthropic → deepseek |
+| Opus（推理/规划） | `ANTHROPIC_DEFAULT_OPUS_MODEL` | `Plan` | 同上 |
+| Sonnet（代码） | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `Code` | anthropic → openai → glm |
+| Haiku / 小模型 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` | `Simple` | glm → deepseek → minimax |
+
+### 启动
+
+```bash
+# 终端 1: 启动 MyGate
+./dist/run.sh
+
+# 终端 2: 启动 CC（在项目目录下，自动读取 .claude/settings.local.json）
+cd /path/to/your/project
+claude
+```
+
+CC 会把 `ANTHROPIC_MODEL=Plan` 作为 `model` 字段发给 MyGate 的 `POST /v1/messages`，MyGate 按 alias 配置的路由链转发到真实后端。
+
+> **注意**：CC v2.0.1+ 中 `settings.json` 的 `env` 优先级高于 shell 环境变量。要用临时配置用 `claude --settings ~/.claude/settings-alt.json`。
+
 ## 端点
 
 | Method | Path | 说明 |
@@ -165,6 +229,10 @@ tests/
 ### 构建
 
 ```bash
+./build.sh          # release 构建 → dist/
+./build.sh debug    # debug 构建
+
+# 或直接用 cargo:
 cargo build --release
 ```
 

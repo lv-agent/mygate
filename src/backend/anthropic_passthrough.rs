@@ -87,8 +87,8 @@ fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> Result<s
             ContentBlock::ToolResult { tool_use_id, content } => serde_json::json!({
                 "type":"tool_result","tool_use_id":tool_use_id,"content":content
             }),
-            _ => serde_json::json!({"type":"text","text":"[unsupported]"})
-        }).collect::<Vec<_>>();
+        }
+        ).collect::<Vec<_>>();
         messages.push(serde_json::json!({"role":role,"content":content}));
     }
 
@@ -297,7 +297,7 @@ pub async fn send_anthropic_streaming_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::types::{ContentBlock, FunctionCall, InternalRequest, InternalMessage, Role, ToolChoice};
+    use crate::core::types::{ContentBlock, InternalRequest, InternalMessage, Role, ToolChoice};
 
     fn req_with_system_and_tool() -> InternalRequest {
         InternalRequest {

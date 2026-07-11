@@ -13,7 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
 DIST_DIR="$PROJECT_DIR/dist"
 BIN_NAME="mygate"
-BUILD_MODE="${1:-debug}"
+# cr-208: 默认 release 构建, debug 需显式指定 (./build.sh debug)
+BUILD_MODE="${1:-release}"
 
 echo "=== MyGate Build ==="
 echo "Mode: $BUILD_MODE"

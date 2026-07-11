@@ -7,11 +7,27 @@
 
 ## 1. 连接配置
 
-CC 通过 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY` 环境变量连接 MyGate：
+CC 通过 `settings.json` 或环境变量连接 MyGate：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080",
+    "ANTHROPIC_AUTH_TOKEN": "mygate",
+    "ANTHROPIC_MODEL": "Plan",
+    "ANTHROPIC_SMALL_FAST_MODEL": "Simple",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "Plan",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "Code",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Simple"
+  }
+}
+```
+
+或使用环境变量：
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:16380
-export ANTHROPIC_API_KEY=any-non-empty-string   # MyGate 不校验 key
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+export ANTHROPIC_AUTH_TOKEN=mygate   # MyGate 不校验 token，但不能为空
 ```
 
 CC 发出的所有请求都走 `/v1/messages` 端点，使用 Anthropic Messages API 格式。
