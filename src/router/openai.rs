@@ -3,25 +3,17 @@ use axum::response::IntoResponse;
 use axum::extract::State;
 use axum::Json;
 use futures::stream::Stream;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 
 use crate::config::AppConfig;
 use crate::core::fallback;
 use crate::core::types::*;
 use crate::error::GatewayError;
-
-#[derive(Clone)]
-pub struct AppState {
-    pub config: Arc<RwLock<AppConfig>>,
-    pub client: Client,
-}
+use crate::state::{AppState, ActiveStreamsGuard};
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAIChatRequest {
@@ -352,47 +344,13 @@ pub async fn chat_completions(
         Ok(Sse::new(guarded).keep_alive(KeepAlive::default()).into_response())
     } else {
         let result = fallback::execute_with_fallback(&state.client, state.config.clone(), &internal_req).await?;
-        // cr-202: tokens_total counter
-        let alias = internal_req.model_alias.clone();
-        let u = &result.response.usage;
-        if let Some(t) = u.prompt_tokens {
-            crate::metrics::metrics().tokens_total.with_label_values(&[&alias, "prompt"]).inc_by(t as f64);
-        }
-        if let Some(t) = u.completion_tokens {
-            crate::metrics::metrics().tokens_total.with_label_values(&[&alias, "completion"]).inc_by(t as f64);
-        }
+        crate::state::record_tokens(
+            &internal_req.model_alias,
+            result.response.usage.prompt_tokens,
+            result.response.usage.completion_tokens,
+        );
         let response = to_openai_response(result.response);
         Ok(Json(response).into_response())
-    }
-}
-
-/// cr-202: 流式 stream 守卫，drop 时 dec `active_streams` gauge
-pub struct ActiveStreamsGuard<S> {
-    inner: S,
-    dec_on_drop: bool,
-}
-
-impl<S> ActiveStreamsGuard<S> {
-    pub fn new(inner: S) -> Self {
-        Self { inner, dec_on_drop: true }
-    }
-}
-
-impl<S> Drop for ActiveStreamsGuard<S> {
-    fn drop(&mut self) {
-        if self.dec_on_drop {
-            crate::metrics::metrics().active_streams.dec();
-        }
-    }
-}
-
-impl<S: futures::Stream + Unpin> futures::Stream for ActiveStreamsGuard<S> {
-    type Item = S::Item;
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::pin::Pin::new(&mut self.inner).poll_next(cx)
     }
 }
 
@@ -406,22 +364,19 @@ async fn create_streaming_response(
     let alias = internal_req.model_alias.clone();
     let target_model = target.model.clone();
 
-    // P0-2: 检测后端 SSE 协议（content-type）。Anthropic SSE 含 `event:` 行
-    // （实际 mock 是 text/plain 也可能误判），改为：Anthropic 数据中含 type/message_start
-    // 字段 → Anthropic 协议；其他 → OpenAI 协议。
-    let _backend_content_type = backend_resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+    // P0-2: 根据 provider_type 确定后端 SSE 协议
+    let is_anthropic_sse = {
+        let cfg = state.config.read().await;
+        cfg.providers
+            .get(&target.provider_name)
+            .map(|p| p.provider_type == "anthropic")
+            .unwrap_or(false)
+    };
 
     let stream = async_stream::stream! {
         let mut byte_stream = backend_resp.bytes_stream();
         let mut buffer = String::new();
         let chunk_timeout = std::time::Duration::from_secs(60);
-        // P0-2: 区分协议。简单启发：检测首个非空 data 行是否含 "type":"message_start"
-        let mut protocol_detected: Option<&'static str> = None;
         loop {
             match tokio::time::timeout(chunk_timeout, byte_stream.next()).await {
                 Ok(Some(chunk_result)) => match chunk_result {
@@ -440,15 +395,7 @@ async fn create_streaming_response(
                                 return;
                             }
                             if let Some(data) = trimmed.strip_prefix("data: ") {
-                                // P0-2: 协议检测（首个非空 data 决定）
-                                if protocol_detected.is_none() {
-                                    if data.contains("message_start") {
-                                        protocol_detected = Some("anthropic");
-                                    } else if data.contains("chat.completion.chunk") {
-                                        protocol_detected = Some("openai");
-                                    }
-                                }
-                                if protocol_detected == Some("anthropic") {
+                                if is_anthropic_sse {
                                     // P0-2: Anthropic → OpenAI 流式转换
                                     if let Some(openai_chunk) =
                                         anthropic_event_to_openai_chunk(data, &alias)
@@ -546,22 +493,6 @@ pub async fn reload_config(
             }
         }
     }
-}
-
-/// cr-411 P2: 提取 <think>...</think> 块. 返回 (visible, reasoning).
-/// MiniMax 等后端把 thinking 文字混在 content 里, 格式: "<think>reasoning</think>\n\nactual"
-pub fn extract_thinking(text: &str) -> (String, Option<String>) {
-    let trimmed = text.trim();
-    // 检测整段是 <think>...</think> (含跨多块) - 简化: 只处理一个 think 块 + 前缀/后缀
-    if let Some(start) = trimmed.find("<think>") {
-        if let Some(end_rel) = trimmed[start..].find("</think>") {
-            let end = start + end_rel + "</think>".len();
-            let thinking = trimmed[start + "<think>".len()..start + end_rel].trim().to_string();
-            let visible = format!("{}{}", &trimmed[..start], &trimmed[end..]).trim().to_string();
-            return (visible, Some(thinking));
-        }
-    }
-    (text.to_string(), None)
 }
 
 // =====================================================================
@@ -694,7 +625,7 @@ fn anthropic_event_to_openai_chunk(data: &str, alias: &str) -> Option<String> {
             let text = v.get("delta").and_then(|d| d.get("text")).and_then(|t| t.as_str());
             let text = text.unwrap_or("");
             // cr-411 P2: 提取 <think>...</think> 块 (MiniMax 等后端把 thinking 混在 text 里)
-            let (visible, reasoning) = extract_thinking(text);
+            let (visible, reasoning) = crate::core::extract_thinking(text);
             let mut delta = serde_json::Map::new();
             delta.insert("role".to_string(), serde_json::Value::String("assistant".to_string()));
             if !visible.is_empty() {

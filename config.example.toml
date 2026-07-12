@@ -19,6 +19,7 @@ base_url = "https://api.anthropic.com"
 api_key = "sk-ant-..."
 provider_type = "anthropic"
 auth_style = "anthropic"   # 真实 Anthropic API 用 x-api-key
+supports_image_url = true  # Anthropic 2024-12+ 支持 source.type="url"
 
 # ========== 国产 3 家 ==========
 

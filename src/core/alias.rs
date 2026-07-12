@@ -45,6 +45,7 @@ mod tests {
                 api_key: "glm-key".to_string(),
                 provider_type: "openai".to_string(),
                 auth_style: "bearer".to_string(),
+                supports_image_url: false,
             },
         );
         providers.insert(
@@ -54,6 +55,7 @@ mod tests {
                 api_key: "ds-key".to_string(),
                 provider_type: "openai".to_string(),
                 auth_style: "bearer".to_string(),
+                supports_image_url: false,
             },
         );
 
@@ -120,6 +122,7 @@ mod tests {
                 api_key: "sk-ant-test".to_string(),
                 provider_type: "anthropic".to_string(),
                 auth_style: "anthropic".to_string(),
+                supports_image_url: false,
             },
         );
         let mut aliases = HashMap::new();

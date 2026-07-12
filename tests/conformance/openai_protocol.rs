@@ -12,7 +12,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::MockBackend;
 use mygate::core::types::*;
-use mygate::router::openai::AppState;
+use mygate::state::AppState;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -469,7 +469,7 @@ priority = 1
 /// cr-411 P2: extract_thinking 单元测试
 #[test]
 fn test_extract_thinking_mixed_content() {
-    use mygate::router::openai::extract_thinking;
+    use mygate::core::extract_thinking;
     // MiniMax 格式: thinking 混在 content 里
     let text = "<think>The user said hi</think>\n\nHello!";
     let (visible, reasoning) = extract_thinking(text);

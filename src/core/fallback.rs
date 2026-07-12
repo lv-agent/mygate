@@ -126,6 +126,9 @@ pub async fn execute_streaming_fallback(
     config: Arc<RwLock<AppConfig>>,
     request: &InternalRequest,
 ) -> Result<(reqwest::Response, ResolvedTarget), GatewayError> {
+    let start = Instant::now();
+    let m = metrics();
+
     let config = config.read().await;
     let chain = alias::resolve_alias(&config, &request.model_alias)?;
     let timeout = Duration::from_secs(config.server.timeout_seconds);
@@ -155,8 +158,23 @@ pub async fn execute_streaming_fallback(
         };
 
         match stream_result {
-            Ok((resp, _is_anthropic)) => return Ok((resp, target.clone())),
+            Ok((resp, _is_anthropic)) => {
+                let duration = start.elapsed().as_secs_f64();
+                m.requests_total
+                    .with_label_values(&[&request.model_alias, "success"])
+                    .inc();
+                m.fallback_attempts_total
+                    .with_label_values(&[&request.model_alias, &target.provider_name, "success"])
+                    .inc();
+                m.request_duration_seconds
+                    .with_label_values(&[&request.model_alias, &target.provider_name])
+                    .observe(duration);
+                return Ok((resp, target.clone()));
+            }
             Err(GatewayError::BackendError { status, body }) if should_fallback(status) => {
+                m.fallback_attempts_total
+                    .with_label_values(&[&request.model_alias, &target.provider_name, "fallback"])
+                    .inc();
                 tracing::warn!(provider = %target.provider_name, model = %target.model, status = status, "Streaming backend failed");
                 last_error = Some(GatewayError::BackendError {
                     status,
@@ -168,12 +186,19 @@ pub async fn execute_streaming_fallback(
             }
             // cr-411 P1: 非 fallback 4xx 错误直接抛, 不让 fallback 视为耗尽
             Err(err) => {
+                m.fallback_attempts_total
+                    .with_label_values(&[&request.model_alias, &target.provider_name, "error"])
+                    .inc();
                 tracing::warn!(provider = %target.provider_name, model = %target.model, error = %err, "Streaming backend non-fallback error");
                 return Err(err);
             }
         }
     }
 
+    // 所有 fallback 都失败
+    m.requests_total
+        .with_label_values(&[&request.model_alias, "fallback_exhausted"])
+        .inc();
     Err(GatewayError::AllFallbacksExhausted(format!(
         "{} — last error: {}",
         request.model_alias,
@@ -199,6 +224,7 @@ mod tests {
                 api_key: "key".to_string(),
                 provider_type: "openai".to_string(),
                 auth_style: "bearer".to_string(),
+                supports_image_url: false,
             },
         );
         let mut aliases = HashMap::new();

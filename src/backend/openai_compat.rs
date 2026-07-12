@@ -208,8 +208,9 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
 
         // If there were tool_results, emit them as separate messages
         if !tool_results.is_empty() {
-            // If there's also text content alongside tool_results (rare but possible),
-            // emit the original message first, then the tool result messages
+            // OpenAI 协议要求 tool 消息紧接 assistant(tool_calls) 之后。
+            // 先发 tool 消息，再把本消息的 text 作为 user message 放后面。
+            result.extend(tool_results);
             if !content.is_null() {
                 result.push(OpenAIMessage {
                     role: role.to_string(),
@@ -218,7 +219,6 @@ fn to_openai_request(req: &InternalRequest, model: &str) -> OpenAIRequest {
                     tool_calls: tool_calls_out,
                 });
             }
-            result.extend(tool_results);
         } else {
             result.push(OpenAIMessage { role: role.to_string(), content, tool_call_id: None, tool_calls: tool_calls_out });
         }

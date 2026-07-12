@@ -10,7 +10,7 @@ use std::pin::Pin;
 use crate::core::fallback;
 use crate::core::types::*;
 use crate::error::GatewayError;
-use crate::router::openai::AppState;
+use crate::state::{AppState, ActiveStreamsGuard};
 
 #[derive(Debug, Deserialize)]
 pub struct AnthropicMessagesRequest {
@@ -383,20 +383,16 @@ pub async fn messages(
         crate::metrics::metrics().active_streams.inc();
         let stream = create_anthropic_stream(state, internal_req).await?;
         // 包装 stream 守卫（drop 时 dec gauge）
-        let guarded = crate::router::openai::ActiveStreamsGuard::new(stream);
+        let guarded = ActiveStreamsGuard::new(stream);
         Ok(Sse::new(guarded).keep_alive(KeepAlive::default()).into_response())
     } else {
         let result =
             fallback::execute_with_fallback(&state.client, state.config.clone(), &internal_req).await?;
-        // cr-202: tokens_total counter（Anthropic input/output → prompt/completion）
-        let alias = internal_req.model_alias.clone();
-        let u = &result.response.usage;
-        if let Some(t) = u.prompt_tokens {
-            crate::metrics::metrics().tokens_total.with_label_values(&[&alias, "prompt"]).inc_by(t as f64);
-        }
-        if let Some(t) = u.completion_tokens {
-            crate::metrics::metrics().tokens_total.with_label_values(&[&alias, "completion"]).inc_by(t as f64);
-        }
+        crate::state::record_tokens(
+            &internal_req.model_alias,
+            result.response.usage.prompt_tokens,
+            result.response.usage.completion_tokens,
+        );
         let response = to_anthropic_response(result.response);
         Ok(Json(response).into_response())
     }

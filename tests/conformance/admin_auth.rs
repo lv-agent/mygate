@@ -8,7 +8,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use mygate::router::openai::AppState;
+use mygate::state::AppState;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower::ServiceExt;

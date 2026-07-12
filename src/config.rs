@@ -36,6 +36,11 @@ pub struct ProviderConfig {
     /// - "anthropic"：用于真实 Anthropic API，发 `x-api-key: <api_key>` + `anthropic-version: 2023-06-01`
     #[serde(default = "default_auth_style")]
     pub auth_style: String,
+    /// cr-207: 是否支持 HTTP(S) image URL（Anthropic source.type="url"）。
+    /// 仅 provider_type="anthropic" 时生效。默认 false（降级为文本）。
+    /// 设为 true 的前提：后端兼容 Anthropic 2024-12+ image url source。
+    #[serde(default)]
+    pub supports_image_url: bool,
 }
 
 fn default_provider_type() -> String {

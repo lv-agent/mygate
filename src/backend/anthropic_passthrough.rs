@@ -8,7 +8,7 @@ use reqwest::Client;
 use std::time::Duration;
 
 /// 构造 Anthropic 协议请求 body（流式与非流式共用）
-fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> Result<serde_json::Value, GatewayError> {
+fn build_anthropic_body(internal_req: &InternalRequest, model: &str, supports_image_url: bool) -> Result<serde_json::Value, GatewayError> {
     // cr-001: system 不在 messages 里，而是顶层字段
     let mut messages: Vec<serde_json::Value> = Vec::new();
     for msg in &internal_req.messages {
@@ -55,11 +55,16 @@ fn build_anthropic_body(internal_req: &InternalRequest, model: &str) -> Result<s
                         "source":{"type":"base64","media_type":media_type,"data":data}
                     })
                 } else if url.starts_with("http://") || url.starts_with("https://") {
-                    // P2-4: HTTP(S) URL → Anthropic url source（2024-12+ 支持）
-                    serde_json::json!({
-                        "type":"image",
-                        "source":{"type":"url","url":url}
-                    })
+                    // cr-207: HTTP(S) URL → Anthropic url source（需 provider 声明 supports_image_url）
+                    if supports_image_url {
+                        serde_json::json!({
+                            "type":"image",
+                            "source":{"type":"url","url":url}
+                        })
+                    } else {
+                        tracing::warn!(url = %url, "HTTP image URL not supported by this provider, degrading to text");
+                        serde_json::json!({"type":"text","text":format!("[image: {}]", url)})
+                    }
                 } else {
                     // 非 data: 非 http(s): 降级为文本（不丢消息）
                     tracing::warn!(url_len = url.len(), "ImageUrl 非 data: / http(s) 格式, 降级为文本");
@@ -160,7 +165,7 @@ fn apply_auth(
     }
 }
 
-pub async fn send_anthropic_request(
+pub(crate) async fn send_anthropic_request(
     client: &reqwest::Client,
     provider: &ProviderConfig,
     internal_req: &InternalRequest,
@@ -169,7 +174,7 @@ pub async fn send_anthropic_request(
     let base = provider.base_url.trim_end_matches('/');
     let url = format!("{}/v1/messages", base);
     let model = preferred_model;
-    let body = build_anthropic_body(internal_req, model)?;
+    let body = build_anthropic_body(internal_req, model, provider.supports_image_url)?;
 
     tracing::info!(model=%model, url=%url, tools=%internal_req.tools.as_ref().map(|t|t.len()).unwrap_or(0), "Anthropic passthrough");
 
@@ -260,7 +265,7 @@ pub async fn send_anthropic_request(
 /// cr-004: 流式请求。返回 reqwest::Response，body 是 Anthropic SSE 事件流。
 /// 调用方（router/anthropic.rs）作为 SSE 原样透传给北向客户端。
 /// 注意：当前实现不转换为 OpenAI SSE — 限制是仅 Anthropic 北向才能用 provider_type=anthropic 后端。
-pub async fn send_anthropic_streaming_request(
+pub(crate) async fn send_anthropic_streaming_request(
     client: &reqwest::Client,
     provider: &ProviderConfig,
     internal_req: &InternalRequest,
@@ -269,7 +274,7 @@ pub async fn send_anthropic_streaming_request(
     let base = provider.base_url.trim_end_matches('/');
     let url = format!("{}/v1/messages", base);
     let model = preferred_model;
-    let mut body = build_anthropic_body(internal_req, model)?;
+    let mut body = build_anthropic_body(internal_req, model, provider.supports_image_url)?;
     // 流式标志
     body["stream"] = serde_json::Value::Bool(true);
 
@@ -333,7 +338,7 @@ mod tests {
     /// cr-004: build_anthropic_body 包含 system 顶层、tools、tool_choice object
     #[test]
     fn test_build_anthropic_body_has_all_fields() {
-        let body = build_anthropic_body(&req_with_system_and_tool(), "claude-sonnet-4-5").unwrap();
+        let body = build_anthropic_body(&req_with_system_and_tool(), "claude-sonnet-4-5", true).unwrap();
         assert_eq!(body["model"], "claude-sonnet-4-5");
         assert_eq!(body["max_tokens"], 1024);
         assert_eq!(body["temperature"], 0.5);
@@ -379,7 +384,7 @@ mod tests {
             metadata: None,
             user: None,
         };
-        let body = build_anthropic_body(&req, "m").unwrap();
+        let body = build_anthropic_body(&req, "m", true).unwrap();
         let content = &body["messages"][0]["content"][0];
         assert_eq!(content["type"], "image");
         assert_eq!(content["source"]["type"], "base64");
@@ -422,7 +427,7 @@ mod tests {
             metadata: None,
             user: None,
         };
-        let body = build_anthropic_body(&req, "m").unwrap();
+        let body = build_anthropic_body(&req, "m", true).unwrap();
         let content = &body["messages"][0]["content"][0];
         assert_eq!(content["type"], "document");
         assert_eq!(content["source"]["type"], "base64");
@@ -464,14 +469,55 @@ mod tests {
             metadata: None,
             user: None,
         };
-        let body = build_anthropic_body(&req, "m").unwrap();
+        let body = build_anthropic_body(&req, "m", true).unwrap();
         let content = &body["messages"][0]["content"][0];
         assert_eq!(content["type"], "document");
         assert_eq!(content["source"]["type"], "url");
         assert_eq!(content["source"]["url"], "https://example.com/spec.pdf");
     }
 
-    /// cr-207: ImageUrl 非 data: 格式（HTTP URL）→ 降级为文本提示，不丢消息
+    /// cr-207: ImageUrl HTTP(S) 格式 → Anthropic image url source（supports_image_url=true）
+    #[test]
+    fn test_image_http_url_passthrough() {
+        use crate::core::types::{ContentBlock, ImageUrlContent, InternalMessage, Role};
+        let req = InternalRequest {
+            model_alias: "P".to_string(),
+            system: None,
+            messages: vec![InternalMessage {
+                role: Role::User,
+                content: vec![ContentBlock::ImageUrl {
+                    image_url: ImageUrlContent {
+                        url: "https://example.com/cat.png".to_string(),
+                        detail: None,
+                    },
+                }],
+            }],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            n: None,
+            stream_options: None,
+            metadata: None,
+            user: None,
+        };
+        let body = build_anthropic_body(&req, "m", true).unwrap();
+        let content = &body["messages"][0]["content"][0];
+        // supports_image_url=true → url source
+        assert_eq!(content["type"], "image");
+        assert_eq!(content["source"]["type"], "url");
+        assert_eq!(content["source"]["url"], "https://example.com/cat.png");
+    }
+
+    /// cr-207: HTTP image URL with supports_image_url=false → 降级为文本
     #[test]
     fn test_image_http_url_degrades_to_text() {
         use crate::core::types::{ContentBlock, ImageUrlContent, InternalMessage, Role};
@@ -504,12 +550,11 @@ mod tests {
             metadata: None,
             user: None,
         };
-        let body = build_anthropic_body(&req, "m").unwrap();
+        let body = build_anthropic_body(&req, "m", false).unwrap();
         let content = &body["messages"][0]["content"][0];
-        // P2-4: HTTP URL → Anthropic url source（2024-12+ 支持）
-        assert_eq!(content["type"], "image");
-        assert_eq!(content["source"]["type"], "url");
-        assert_eq!(content["source"]["url"], "https://example.com/cat.png");
+        // supports_image_url=false → 降级为 text
+        assert_eq!(content["type"], "text");
+        assert!(content["text"].as_str().unwrap().contains("[image: https://example.com/cat.png]"));
     }
 
     #[test]
@@ -535,7 +580,7 @@ mod tests {
             metadata: None,
             user: None,
         };
-        let body = build_anthropic_body(&req, "m").unwrap();
+        let body = build_anthropic_body(&req, "m", true).unwrap();
         assert_eq!(body["model"], "m");
         assert_eq!(body["max_tokens"], 100);
         assert!(body.get("system").is_none());
@@ -615,7 +660,7 @@ fn test_pdf_size_limit() {
         user: None,
         metadata: None,
     };
-    let result = build_anthropic_body(&req, "m");
+    let result = build_anthropic_body(&req, "m", true);
     assert!(result.is_err(), "大 PDF 应被拒发");
     let err = result.unwrap_err();
     assert!(format!("{}", err).contains("PDF too large"), "错误信息应含 'PDF too large': {}", err);
@@ -657,6 +702,6 @@ fn test_pdf_under_limit_passes() {
         user: None,
         metadata: None,
     };
-    let result = build_anthropic_body(&req, "m");
+    let result = build_anthropic_body(&req, "m", true);
     assert!(result.is_ok(), "小 PDF 应通过: {:?}", result.err());
 }

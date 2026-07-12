@@ -14,7 +14,7 @@ use axum::http::{Request, StatusCode};
 mod common;
 
 use common::MockBackend;
-use mygate::router::openai::AppState;
+use mygate::state::AppState;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;

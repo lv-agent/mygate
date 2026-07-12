@@ -1,8 +1,9 @@
 use axum::routing::{get, post};
 use axum::Router;
 
-use crate::router::openai::{chat_completions, list_models, reload_config, AppState};
+use crate::router::openai::{chat_completions, list_models, reload_config};
 use crate::router::anthropic;
+use crate::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()

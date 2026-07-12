@@ -12,7 +12,7 @@ use axum::http::{Request, StatusCode};
 mod common;
 
 use common::MockBackend;
-use mygate::router::openai::AppState;
+use mygate::state::AppState;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -242,4 +242,126 @@ async fn anthropic_non_streaming_works() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// 端到端：Anthropic 流式透传（provider_type=anthropic，SSE 原样转发）
+/// 验证 `create_anthropic_stream` SSE passthrough 路径：
+/// mock 后端发 Anthropic SSE 事件 → MyGate 原样透传给北向客户端
+#[tokio::test]
+async fn anthropic_streaming_passthrough_e2e() {
+    let mock = MockBackend::new();
+    mock.push_script(common::MockResponse::StreamSse {
+        events: vec![
+            common::SseEvent {
+                event: Some("message_start".to_string()),
+                data: r#"{"type":"message_start","message":{"id":"msg_s","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0}}}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("content_block_start".to_string()),
+                data: r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("content_block_delta".to_string()),
+                data: r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Streaming"}}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("content_block_delta".to_string()),
+                data: r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" works!"}}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("content_block_stop".to_string()),
+                data: r#"{"type":"content_block_stop","index":0}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("message_delta".to_string()),
+                data: r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}"#.to_string(),
+            },
+            common::SseEvent {
+                event: Some("message_stop".to_string()),
+                data: r#"{"type":"message_stop"}"#.to_string(),
+            },
+        ],
+    });
+    let mock_url = mock.start().await;
+    let app = build_app_with_anthro_mock(mock_url);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .body(Body::from(
+            json!({
+                "model": "Plan",
+                "max_tokens": 100,
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 收集所有 SSE 事件
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 10 * 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body_bytes).to_string();
+
+    // 解析 (event, data) 对
+    let mut pairs: Vec<(Option<String>, String)> = Vec::new();
+    let mut current_event: Option<String> = None;
+    for line in text.lines() {
+        if line.starts_with("event: ") {
+            current_event = Some(line[7..].to_string());
+        } else if let Some(data) = line.strip_prefix("data: ") {
+            pairs.push((current_event.take(), data.to_string()));
+        }
+    }
+
+    // 验证：7 个事件（event+data 对）
+    assert_eq!(pairs.len(), 7, "expected 7 SSE event pairs, got {}: {:?}", pairs.len(), pairs);
+
+    // 验证事件序列
+    let expected_sequence = [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ];
+    for (i, (ev, _)) in pairs.iter().enumerate() {
+        assert_eq!(
+            ev.as_deref().unwrap_or(""),
+            expected_sequence[i],
+            "event {}: expected {}, got {:?}",
+            i, expected_sequence[i], ev
+        );
+    }
+
+    // 验证：delta 事件拼接后得到完整文本 "Streaming works!"
+    let combined: String = pairs
+        .iter()
+        .filter(|(ev, _)| ev.as_deref() == Some("content_block_delta"))
+        .filter_map(|(_, data)| {
+            serde_json::from_str::<serde_json::Value>(data).ok()?
+                ["delta"]["text"].as_str().map(String::from)
+        })
+        .collect();
+    assert_eq!(combined, "Streaming works!");
+
+    // 验证：后端收到 stream=true 请求
+    let received = mock.received();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].path, "/v1/messages");
+    assert_eq!(
+        received[0].body["stream"],
+        serde_json::Value::Bool(true),
+        "后端应收到 stream=true"
+    );
+    // stream_options（Anthropic 协议不发，应为 null）
+    assert_eq!(received[0].body["stream_options"], serde_json::Value::Null);
+}
 

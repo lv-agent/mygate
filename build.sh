@@ -74,6 +74,9 @@ if [ ! -f config.toml ]; then
     fi
 fi
 
+# RUST_LOG: 默认 info，可通过环境变量覆盖（如 RUST_LOG=mygate=debug ./run.sh）
+export RUST_LOG="${RUST_LOG:-info,mygate=debug}"
+
 exec ./mygate "$@"
 RUNEOF
 chmod +x "$DIST_DIR/run.sh"
