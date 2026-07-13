@@ -15,7 +15,15 @@ RESULTS=()
 FAILS=0
 
 # MyGate 配置 (使用真实 keys)
-cat > /tmp/l4-config.toml << 'EOF'
+# run with: L4_DEEPSEEK_KEY=sk-... L4_MINIMAX_KEY=sk-... bash tests/l4_e2e.sh
+DS_KEY="${L4_DEEPSEEK_KEY:-}"
+MM_KEY="${L4_MINIMAX_KEY:-}"
+if [ -z "$DS_KEY" ] || [ -z "$MM_KEY" ]; then
+    echo "ERROR: set L4_DEEPSEEK_KEY and L4_MINIMAX_KEY env vars"
+    exit 1
+fi
+
+cat > /tmp/l4-config.toml << EOF
 [server]
 host = "127.0.0.1"
 port = 18080
@@ -24,19 +32,19 @@ admin_token = "l4-test"
 
 [providers.deepseek]
 base_url = "https://api.deepseek.com/v1"
-api_key = "KEY_REMOVED"
+api_key = "$DS_KEY"
 provider_type = "openai"
 auth_style = "bearer"
 
 [providers.minimax-openai]
 base_url = "https://api.minimaxi.com/v1"
-api_key = "KEY_REMOVED"
+api_key = "$MM_KEY"
 provider_type = "openai"
 auth_style = "bearer"
 
 [providers.minimax-anthropic]
 base_url = "https://api.minimaxi.com/anthropic"
-api_key = "KEY_REMOVED"
+api_key = "$MM_KEY"
 provider_type = "anthropic"
 auth_style = "bearer"
 
